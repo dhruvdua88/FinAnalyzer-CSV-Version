@@ -1,6 +1,7 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { LedgerEntry } from '../../types';
 import { groupVouchers, getUniqueLedgers, exportToExcel } from '../../services/dataService';
+import { useTallyStore } from '../../services/tally';
 import { Search, Filter, AlertTriangle, CheckCircle2, Download, ChevronDown, ChevronUp, X, CheckSquare, Square, Calculator, Layers, Users, Info, Percent, SlidersHorizontal, ClipboardList } from 'lucide-react';
 
 interface RCMAnalysisProps {
@@ -21,6 +22,13 @@ interface VoucherDetail {
   calculatedRate: number;
   rcmLedgers: string[];
   narration: string;
+  // Party master attributes (from mst_ledger.gst_registration_type when the
+  // ZIP store is loaded). The Sec 9(4) flag fires when an UNREGISTERED
+  // supplier was used and RCM was NOT deducted — the auditor should verify
+  // that the purchase doesn't fall in the notified categories that mandate
+  // RCM on unregistered supplies.
+  partyGstRegType: string;
+  sec9_4Flag: boolean;
 }
 
 interface SummaryGroup {
@@ -43,6 +51,17 @@ const RCM_CHECKLIST = [
 ];
 
 const RCMAnalysis: React.FC<RCMAnalysisProps> = ({ data, externalSelectedLedgers, onLedgersUpdate }) => {
+  // Party GST registration-type lookup from mst_ledger
+  const store = useTallyStore();
+  const partyRegTypeByName = useMemo(() => {
+    const map = new Map<string, string>();
+    if (!store) return map;
+    for (const l of store.ledgers.values()) {
+      const t = (l.gst_registration_type || '').trim();
+      if (t) map.set(l.name.trim().toLowerCase(), t);
+    }
+    return map;
+  }, [store]);
   // Use external state if provided, otherwise internal
   const [internalSelectedLedgers, setInternalSelectedLedgers] = useState<string[]>([]);
   
@@ -107,10 +126,16 @@ const RCMAnalysis: React.FC<RCMAnalysisProps> = ({ data, externalSelectedLedgers
         groupObj.totalRCM += isDeducted ? voucherRcmAmount : 0;
         if (isDeducted) groupObj.deductedCount++; else groupObj.missedCount++;
 
+        const partyKey = String(entry.party_name || '').trim().toLowerCase();
+        const partyGstRegType = partyRegTypeByName.get(partyKey) || '';
+        // Sec 9(4): supplier unregistered + RCM not deducted → flag for review.
+        const sec9_4Flag = !isDeducted && /^unregistered$/i.test(partyGstRegType);
         groupObj.vouchers.push({
           date: entry.date, voucher_number: entry.voucher_number, party_name: entry.party_name || 'N/A',
           expenseLedger: entry.Ledger, netAmount, isRcmDeducted: isDeducted, rcmAmount: voucherRcmAmount,
-          calculatedRate: parseFloat(itemRate.toFixed(2)), rcmLedgers: rcmEntries.map(e => e.Ledger as string), narration: entry.narration || ''
+          calculatedRate: parseFloat(itemRate.toFixed(2)), rcmLedgers: rcmEntries.map(e => e.Ledger as string),
+          narration: entry.narration || '',
+          partyGstRegType, sec9_4Flag,
         });
       });
     });
@@ -122,7 +147,7 @@ const RCMAnalysis: React.FC<RCMAnalysisProps> = ({ data, externalSelectedLedgers
     }))
     .filter(g => g.totalExpense >= parseFloat(minLedgerThreshold || '0'))
     .sort((a, b) => b.totalExpense - a.totalExpense);
-  }, [data, selectedTaxLedgers, viewMode, minVoucherThreshold, statusFilter, rateFilter, minLedgerThreshold]);
+  }, [data, selectedTaxLedgers, viewMode, minVoucherThreshold, statusFilter, rateFilter, minLedgerThreshold, partyRegTypeByName]);
 
   const filteredGroups = useMemo(() => {
     if (!mainSearch.trim()) return analysisGroups;
@@ -187,7 +212,15 @@ const RCMAnalysis: React.FC<RCMAnalysisProps> = ({ data, externalSelectedLedgers
                     <div className="flex items-center gap-10 shrink-0"><div className="text-right"><p className="text-[10px] uppercase font-bold text-slate-400">Total Vol</p><p className="font-mono font-bold text-slate-900">₹{group.totalExpense.toLocaleString('en-IN')}</p></div><div className="text-right hidden sm:block"><p className="text-[10px] uppercase font-bold text-slate-400">Avg Rate</p><p className="font-mono font-bold text-purple-600 text-base flex items-center justify-end gap-1"><Percent size={14} />{group.avgAppliedRate.toFixed(2)}%</p></div><div className="text-right"><p className="text-[10px] uppercase font-bold text-slate-400">Compliance</p><div className="flex items-center gap-2"><div className="w-20 h-2 bg-slate-200 rounded-full overflow-hidden hidden lg:block"><div className={`h-full transition-all duration-500 ${group.complianceRate > 90 ? 'bg-green-500' : group.complianceRate > 50 ? 'bg-amber-500' : 'bg-red-500'}`} style={{ width: `${group.complianceRate}%` }} /></div><p className={`font-bold ${group.complianceRate > 90 ? 'text-green-600' : group.complianceRate > 50 ? 'text-amber-600' : 'text-red-600'}`}>{group.complianceRate.toFixed(0)}%</p></div></div><div className="text-slate-400">{isOpen ? <ChevronUp size={20} /> : <ChevronDown size={20} />}</div></div>
                   </div>
                   {isOpen && (
-                    <div className="p-0 border-t border-slate-100 bg-white animate-in slide-in-from-top-2 duration-300 overflow-x-auto"><table className="w-full text-sm text-left border-collapse"><thead className="bg-slate-50 text-slate-500 font-bold uppercase border-b border-slate-200"><tr><th className="px-6 py-4">Date</th><th className="px-6 py-4">Voucher No</th><th className="px-6 py-4">{viewMode === 'ledger' ? 'Party' : 'Expense Ledger'}</th><th className="px-6 py-4 text-right bg-slate-100/50">Dr. Amt (₹)</th><th className="px-6 py-4 text-center">Status</th><th className="px-6 py-4 text-center">Rate (%)</th><th className="px-6 py-4 text-right">RCM (₹)</th><th className="px-6 py-4">Narration</th></tr></thead><tbody className="divide-y divide-slate-100">{group.vouchers.map((v, idx) => (<tr key={idx} className="hover:bg-slate-50 transition-colors"><td className="px-6 py-4 text-slate-600 whitespace-nowrap">{v.date}</td><td className="px-6 py-4 font-bold text-slate-900">{v.voucher_number}</td><td className="px-6 py-4 text-slate-700 font-medium truncate max-w-[180px]">{viewMode === 'ledger' ? v.party_name : v.expenseLedger}</td><td className="px-6 py-4 text-right font-mono font-extrabold text-slate-900 bg-slate-50/50">₹{v.netAmount.toLocaleString('en-IN')}</td><td className="px-6 py-4 text-center"><span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase border-2 ${v.isRcmDeducted ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>{v.isRcmDeducted ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}{v.isRcmDeducted ? 'Paid' : 'Missed'}</span></td><td className="px-6 py-4 text-center">{v.isRcmDeducted ? <span className="font-mono font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded border border-purple-100">{v.calculatedRate}%</span> : '-'}</td><td className="px-6 py-4 text-right font-mono text-slate-500 font-semibold">{v.rcmAmount > 0 ? `₹${v.rcmAmount.toLocaleString('en-IN')}` : '-'}</td><td className="px-6 py-4 text-slate-400 italic truncate max-w-xs">{v.narration}</td></tr>))}</tbody></table></div>
+                    <div className="p-0 border-t border-slate-100 bg-white animate-in slide-in-from-top-2 duration-300 overflow-x-auto"><table className="w-full text-sm text-left border-collapse"><thead className="bg-slate-50 text-slate-500 font-bold uppercase border-b border-slate-200"><tr><th className="px-6 py-4">Date</th><th className="px-6 py-4">Voucher No</th><th className="px-6 py-4">{viewMode === 'ledger' ? 'Party' : 'Expense Ledger'}</th><th className="px-6 py-4 text-right bg-slate-100/50">Dr. Amt (₹)</th><th className="px-6 py-4 text-center">Status</th><th className="px-6 py-4 text-center">Rate (%)</th><th className="px-6 py-4 text-right">RCM (₹)</th><th className="px-6 py-4">Narration</th></tr></thead><tbody className="divide-y divide-slate-100">{group.vouchers.map((v, idx) => (<tr key={idx} className="hover:bg-slate-50 transition-colors"><td className="px-6 py-4 text-slate-600 whitespace-nowrap">{v.date}</td><td className="px-6 py-4 font-bold text-slate-900">{v.voucher_number}</td><td className="px-6 py-4 text-slate-700 font-medium truncate max-w-[220px]">
+  <div className="truncate">{viewMode === 'ledger' ? v.party_name : v.expenseLedger}</div>
+  {v.partyGstRegType && viewMode === 'ledger' && (
+    <div className={`text-[10px] mt-0.5 truncate ${v.sec9_4Flag ? 'text-rose-600 font-bold' : 'text-slate-400 italic'}`}
+         title={v.sec9_4Flag ? 'Sec 9(4) CGST: RCM may be applicable on unregistered supplies — verify notification category' : v.partyGstRegType}>
+      {v.sec9_4Flag ? `⚠ ${v.partyGstRegType} · Sec 9(4)?` : v.partyGstRegType}
+    </div>
+  )}
+</td><td className="px-6 py-4 text-right font-mono font-extrabold text-slate-900 bg-slate-50/50">₹{v.netAmount.toLocaleString('en-IN')}</td><td className="px-6 py-4 text-center"><span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase border-2 ${v.isRcmDeducted ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>{v.isRcmDeducted ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}{v.isRcmDeducted ? 'Paid' : 'Missed'}</span></td><td className="px-6 py-4 text-center">{v.isRcmDeducted ? <span className="font-mono font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded border border-purple-100">{v.calculatedRate}%</span> : '-'}</td><td className="px-6 py-4 text-right font-mono text-slate-500 font-semibold">{v.rcmAmount > 0 ? `₹${v.rcmAmount.toLocaleString('en-IN')}` : '-'}</td><td className="px-6 py-4 text-slate-400 italic truncate max-w-xs">{v.narration}</td></tr>))}</tbody></table></div>
                   )}
                 </div>
               );

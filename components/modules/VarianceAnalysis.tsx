@@ -1,6 +1,7 @@
 ﻿import React, { useMemo, useState, useEffect } from 'react';
 import { LedgerEntry } from '../../types';
 import { getUniqueLedgers, exportToExcel } from '../../services/dataService';
+import { useTallyStore } from '../../services/tally';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend } from 'recharts';
 import { Search, Filter, Download, ChevronDown, ChevronUp, X, CheckSquare, Square, TrendingUp, TrendingDown, AlertCircle, Settings2 } from 'lucide-react';
 
@@ -24,6 +25,24 @@ interface LedgerTrend {
 }
 
 const VarianceAnalysis: React.FC<VarianceAnalysisProps> = ({ data }) => {
+  // mst_group.is_revenue gives Tally's authoritative P&L-vs-BS verdict.
+  // When the ZIP store is loaded we use it for auto-select (every P&L
+  // ledger is picked), which is more accurate than the previous keyword
+  // scan that missed e.g. "Commission Received" or "Foreign Exchange Gain"
+  // that don't contain the literal words "expense" or "purchase".
+  const store = useTallyStore();
+  const ledgerIsRevenueMap = useMemo(() => {
+    const map = new Map<string, boolean>();
+    if (!store) return map;
+    for (const l of store.ledgers.values()) {
+      const g = store.group(l.parent);
+      // ledger.is_revenue is also populated; fall back to its group's flag
+      // when the ledger itself doesn't carry one.
+      const flag = l.is_revenue || (g?.is_revenue ?? false);
+      map.set(l.name.trim().toLowerCase(), flag);
+    }
+    return map;
+  }, [store]);
   // 1. Persistence for Ledger Selection
   const [selectedLedgers, setSelectedLedgers] = useState<string[]>(() => {
     try {
@@ -47,23 +66,30 @@ const VarianceAnalysis: React.FC<VarianceAnalysisProps> = ({ data }) => {
   useEffect(() => {
     if (selectedLedgers === null) {
       const autoSelected = allLedgers.filter(ledger => {
-        // Find a representative entry for this ledger to check its group
+        // Prefer Tally's authoritative is_revenue flag from mst_group when
+        // available — picks up every P&L ledger including ones whose names
+        // don't contain the literal "expense" / "purchase".
+        const isRev = ledgerIsRevenueMap.get(ledger.trim().toLowerCase());
+        if (isRev !== undefined) return isRev;
+
+        // Fallback: keyword scan against TallyPrimary / Group for live-loader
+        // imports where the relational store isn't populated.
         const entry = data.find(d => d.Ledger === ledger);
         if (!entry) return false;
-        
+
         const primary = (entry.TallyPrimary || '').toLowerCase();
         const group = (entry.Group || '').toLowerCase();
-        
+
         return (
-          primary.includes('expense') || 
+          primary.includes('expense') ||
           primary.includes('purchase') ||
-          group.includes('expense') || 
+          group.includes('expense') ||
           group.includes('purchase')
         );
       });
       setSelectedLedgers(autoSelected);
     }
-  }, [allLedgers, data, selectedLedgers]);
+  }, [allLedgers, data, selectedLedgers, ledgerIsRevenueMap]);
 
   // Persist changes
   useEffect(() => {

@@ -29,6 +29,7 @@ import type {
   RoutedBucket,
   OrphanPLFilters,
 } from '../../workers/orphanPLWorker';
+import { useTallyStore } from '../../services/tally';
 
 interface Props {
   data: LedgerEntry[];
@@ -99,6 +100,20 @@ type SortKey = 'date' | 'amount' | 'voucher_type' | 'voucher_number';
 
 // ── Component ─────────────────────────────────────────────────────────────────
 const OrphanPLVouchers: React.FC<Props> = ({ data }) => {
+  // P&L universe per mst_group.is_revenue — the authoritative scope check.
+  // The worker classifies P&L hits from TallyPrimary (which the shim
+  // already populates from store.primaryGroupFor), but here we surface the
+  // ground-truth count so the auditor can validate the scope at a glance.
+  const store = useTallyStore();
+  const plLedgerCount = useMemo(() => {
+    if (!store) return null;
+    let n = 0;
+    for (const l of store.ledgers.values()) {
+      const g = store.group(l.parent);
+      if (g?.is_revenue) n += 1;
+    }
+    return n;
+  }, [store]);
   // Filters
   const [fromDate, setFromDate] = useState<string>('');
   const [toDate, setToDate] = useState<string>('');
@@ -483,6 +498,12 @@ const OrphanPLVouchers: React.FC<Props> = ({ data }) => {
             <p className="text-sm text-slate-500 mt-1 max-w-3xl">
               Vouchers where a Profit & Loss ledger moves but <span className="font-semibold">no Sundry Creditor / Sundry Debtor</span> is on the counter side.
               These bypass the normal party-invoice workflow — direct bank payments, journal adjustments against loans/capital, cash sales, and inter-ledger hacks.
+              {plLedgerCount !== null && (
+                <span className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-100 text-[10px] font-bold uppercase tracking-wider"
+                      title="P&L universe sourced from mst_group.is_revenue=true (authoritative). Worker classifies hits via TallyPrimary which the shim populates from this same group flag.">
+                  {plLedgerCount} P&L ledgers in scope
+                </span>
+              )}
               {computing && (
                 <span className="ml-3 inline-flex items-center gap-1 text-indigo-600 font-semibold">
                   <Loader2 size={12} className="animate-spin" /> Computing…

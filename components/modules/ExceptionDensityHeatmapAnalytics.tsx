@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { AlertTriangle, Download, Filter, Search, ShieldAlert } from 'lucide-react';
 import { LedgerEntry } from '../../types';
+import { useTallyStore } from '../../services/tally';
 
 type Severity = 'High' | 'Medium' | 'Low';
 
@@ -220,6 +221,22 @@ const ExceptionDensityHeatmapAnalytics: React.FC<ExceptionDensityHeatmapAnalytic
   const [exceptionTypeFilter, setExceptionTypeFilter] = useState<'all' | ExceptionTypeId>('all');
   const [monthFilter, setMonthFilter] = useState<string>('all');
 
+  // mst_ledger GSTIN by party — used to upgrade the GST_WITHOUT_GSTIN
+  // exception reason when the master *does* have a GSTIN on file but the
+  // voucher booking didn't carry it through. That subtle "master OK,
+  // voucher dropped it" pattern is what auditors actually want to fix
+  // (the master GSTIN can be propagated into all future bookings).
+  const store = useTallyStore();
+  const partyGstinByName = useMemo(() => {
+    const map = new Map<string, string>();
+    if (!store) return map;
+    for (const l of store.ledgers.values()) {
+      const g = (l.gstn || '').trim();
+      if (g) map.set(l.name.trim().toLowerCase(), g);
+    }
+    return map;
+  }, [store]);
+
   const { vouchers, exceptions, months, matrix, maxCellCount } = useMemo(() => {
     const voucherMap = new Map<string, LedgerEntry[]>();
 
@@ -369,7 +386,11 @@ const ExceptionDensityHeatmapAnalytics: React.FC<ExceptionDensityHeatmapAnalytic
       }
 
       if (voucher.hasGstLedger && !voucher.gstin) {
-        pushException(voucher, 'GST_WITHOUT_GSTIN', 'GST ledger present but GSTIN is blank.');
+        const masterGstin = partyGstinByName.get((voucher.partyName || '').trim().toLowerCase());
+        const reason = masterGstin
+          ? `GST ledger present but voucher GSTIN is blank. Master has GSTIN ${masterGstin} — update voucher to carry it.`
+          : 'GST ledger present but GSTIN is blank.';
+        pushException(voucher, 'GST_WITHOUT_GSTIN', reason);
       }
 
       if (voucher.hasLargeRoundOff) {
@@ -407,7 +428,7 @@ const ExceptionDensityHeatmapAnalytics: React.FC<ExceptionDensityHeatmapAnalytic
       matrix: monthTypeMatrix,
       maxCellCount: maxCount,
     };
-  }, [data]);
+  }, [data, partyGstinByName]);
 
   const filteredExceptions = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();

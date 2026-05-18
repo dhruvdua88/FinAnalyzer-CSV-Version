@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Download, Search, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { LedgerEntry } from '../../types';
+import { useTallyStore } from '../../services/tally';
 
 type LedgerClass = 'Asset' | 'Liability' | 'Balance Sheet' | 'P&L' | 'Unknown';
 type Severity = 'High' | 'Medium' | 'Low';
@@ -163,7 +164,21 @@ const daysBetween = (fromDate: string, toDate: string) => {
   return Math.floor(delta / (1000 * 60 * 60 * 24));
 };
 
-const detectLedgerClass = (primary: string, parent: string): LedgerClass => {
+// Hint sourced from mst_group.is_revenue / is_deemedpositive when a ZIP
+// store is available. When provided, it pre-empts the keyword scan with
+// Tally's authoritative classification — is_revenue=true is unambiguously
+// P&L, is_revenue=false with is_deemedpositive=true is an Asset (Dr side),
+// is_revenue=false with is_deemedpositive=false is a Liability (Cr side).
+interface StoreClassHint {
+  isRevenue: boolean;
+  isDeemedPositive: boolean;
+}
+
+const detectLedgerClass = (primary: string, parent: string, hint?: StoreClassHint): LedgerClass => {
+  if (hint) {
+    if (hint.isRevenue) return 'P&L';
+    return hint.isDeemedPositive ? 'Asset' : 'Liability';
+  }
   const combined = `${primary} ${parent}`.toLowerCase();
 
   if (ASSET_KEYWORDS.some((key) => combined.includes(key))) return 'Asset';
@@ -183,6 +198,22 @@ const BalanceSheetCleanlinessAnalytics: React.FC<BalanceSheetCleanlinessAnalytic
   const [searchTerm, setSearchTerm] = useState('');
   const [issueFilter, setIssueFilter] = useState<'all' | IssueTypeId>('all');
   const [onlyFlagged, setOnlyFlagged] = useState(true);
+
+  // Per-ledger classification hints from mst_group via the store.
+  const store = useTallyStore();
+  const classHintByLedger = useMemo(() => {
+    const map = new Map<string, StoreClassHint>();
+    if (!store) return map;
+    for (const l of store.ledgers.values()) {
+      const g = store.group(l.parent);
+      if (!g) continue;
+      map.set(l.name.trim().toLowerCase(), {
+        isRevenue: g.is_revenue,
+        isDeemedPositive: g.is_deemedpositive,
+      });
+    }
+    return map;
+  }, [store]);
 
   const { ledgerSnapshots, issueRows, periodEndDate } = useMemo(() => {
     const ledgerMap = new Map<string, LedgerEntry[]>();
@@ -208,7 +239,8 @@ const BalanceSheetCleanlinessAnalytics: React.FC<BalanceSheetCleanlinessAnalytic
       const sample = rows[0];
       const primary = String(sample?.TallyPrimary || 'Unclassified').trim() || 'Unclassified';
       const parent = String(sample?.TallyParent || sample?.Group || 'Ungrouped').trim() || 'Ungrouped';
-      const ledgerClass = detectLedgerClass(primary, parent);
+      const hint = classHintByLedger.get(ledger.trim().toLowerCase());
+      const ledgerClass = detectLedgerClass(primary, parent, hint);
 
       let opening = 0;
       let closing = 0;
@@ -381,7 +413,7 @@ const BalanceSheetCleanlinessAnalytics: React.FC<BalanceSheetCleanlinessAnalytic
       issueRows: flatIssueRows,
       periodEndDate: maxDate,
     };
-  }, [data]);
+  }, [data, classHintByLedger]);
 
   const visibleRows = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();

@@ -41,6 +41,7 @@ import {
 import type { LedgerEntry, TDSThresholdConfig, TDSSectionMapping, AuditAnnotation } from '../../types';
 import { TDS_SECTION_DEFAULTS } from '../../types';
 import { getUniqueLedgers } from '../../services/dataService';
+import { useTallyStore } from '../../services/tally';
 import type {
   TdsRawRow,
   TDSVoucherDetail,
@@ -224,6 +225,25 @@ const TDSAnalysis: React.FC<TDSAnalysisProps> = ({
   onAnnotationsUpdate,
   isSqlMode = false,
 }) => {
+  // ── Party master attributes from mst_ledger (for PAN-on-file checks) ──────
+  // Section 206AA: when a deductee's PAN is not on file, TDS must be deducted
+  // at the higher of 20% / twice the prescribed rate / actual rate. Surfacing
+  // the real PAN from mst_ledger.it_pan lets auditors spot 206AA exposure
+  // immediately in the per-voucher table.
+  const store = useTallyStore();
+  const partyMasterByName = useMemo(() => {
+    const map = new Map<string, { pan: string; gstin: string; regType: string }>();
+    if (!store) return map;
+    for (const l of store.ledgers.values()) {
+      map.set(l.name.trim().toLowerCase(), {
+        pan: (l.it_pan || '').trim(),
+        gstin: (l.gstn || '').trim(),
+        regType: (l.gst_registration_type || '').trim(),
+      });
+    }
+    return map;
+  }, [store]);
+
   // ── Ledger selection ──────────────────────────────────────────────────────
   const [internalLedgers, setInternalLedgers] = useState<string[]>([]);
   const selectedTaxLedgers = externalSelectedLedgers ?? internalLedgers;
@@ -990,8 +1010,26 @@ const TDSAnalysis: React.FC<TDSAnalysisProps> = ({
                                   <div>{v.voucher_number}</div>
                                   <div className="font-normal text-slate-400">{v.voucher_type}</div>
                                 </td>
-                                <td className="px-4 py-3 text-slate-700 font-medium truncate max-w-[150px]" title={viewMode === 'ledger' ? v.party_name : v.expenseLedger}>
-                                  {viewMode === 'ledger' ? v.party_name : v.expenseLedger}
+                                <td className="px-4 py-3 text-slate-700 font-medium truncate max-w-[200px]"
+                                    title={viewMode === 'ledger' ? v.party_name : v.expenseLedger}>
+                                  <div className="truncate">{viewMode === 'ledger' ? v.party_name : v.expenseLedger}</div>
+                                  {viewMode === 'ledger' && (() => {
+                                    const m = partyMasterByName.get((v.party_name || '').trim().toLowerCase());
+                                    if (!m) return null;
+                                    // Section 206AA flag: PAN missing AND TDS was deducted (or
+                                    // should have been) → highlight in red.
+                                    const panMissing = !m.pan && v.tdsAmount > 0;
+                                    return (
+                                      <div className="text-[10px] mt-0.5 truncate font-mono"
+                                           title={`GSTIN ${m.gstin || '—'} · PAN ${m.pan || 'MISSING'} · ${m.regType || ''}`}>
+                                        {m.pan
+                                          ? <span className="text-slate-400">PAN {m.pan}</span>
+                                          : panMissing
+                                            ? <span className="text-red-600 font-bold">⚠ PAN MISSING · 206AA</span>
+                                            : <span className="text-slate-300">PAN —</span>}
+                                      </div>
+                                    );
+                                  })()}
                                 </td>
                                 <td className={`px-4 py-3 text-right font-mono font-extrabold bg-slate-50/50 ${v.netAmount < 0 ? 'text-red-600' : 'text-slate-900'}`}>
                                   ₹{fmt(v.netAmount)}
