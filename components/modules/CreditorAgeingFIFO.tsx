@@ -1,7 +1,6 @@
 ﻿
 import React, { useEffect, useMemo, useState } from 'react';
 import { LedgerEntry } from '../../types';
-import BillwiseAgeing from './BillwiseAgeing';
 import {
   Download,
   Search,
@@ -629,14 +628,6 @@ const CreditorAgeingFIFO: React.FC<CreditorAgeingFIFOProps> = ({ data }) => {
         </h2>
         <p className="mt-2 text-sm text-slate-300">A/P ageing matrix with CFO-focused overdue visibility.</p>
       </div>
-
-      {/* True-FIFO bill knockoff via trn_bill — see DebtorAgeingFIFO for
-          docs. Rendered above the legacy voucher-date FIFO so auditors
-          can compare both views and reconcile the deltas. */}
-      <BillwiseAgeing
-        primary="Sundry Creditors"
-        asOf={ddMmYyyyToIso(asOfDateText) || undefined}
-      />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-4">
         <div className="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm">

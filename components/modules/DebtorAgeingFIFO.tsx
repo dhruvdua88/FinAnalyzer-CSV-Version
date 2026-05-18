@@ -1,7 +1,6 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { LedgerEntry } from '../../types';
-import BillwiseAgeing from './BillwiseAgeing';
 import {
   Download,
   Search,
@@ -629,14 +628,6 @@ const DebtorAgeingFIFO: React.FC<DebtorAgeingFIFOProps> = ({ data }) => {
         </h2>
         <p className="mt-2 text-sm text-slate-300">Ageing matrix designed for CFO-level receivable monitoring.</p>
       </div>
-
-      {/* True-FIFO bill knockoff via trn_bill (only available with the ZIP
-          import). Renders a "ZIP required" notice for live-loader imports
-          — the legacy voucher-date FIFO below remains available there. */}
-      <BillwiseAgeing
-        primary="Sundry Debtors"
-        asOf={ddMmYyyyToIso(asOfDateText) || undefined}
-      />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-4">
         <div className="rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm">
