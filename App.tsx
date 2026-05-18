@@ -664,12 +664,7 @@ const App: React.FC = () => {
                 <SalesRegister data={transactionData} externalSelectedLedgers={settings.salesGstLedgers} />
               )}
               {activeModule === AnalysisType.PURCHASE_GST_REGISTER && (
-                <PurchaseGSTRegister
-                  data={transactionData}
-                  externalSelectedLedgers={settings.purchaseGstLedgers}
-                  externalRcmLedgers={settings.rcmTaxLedgers}
-                  onLedgersUpdate={(l) => updateSettings({ purchaseGstLedgers: l })}
-                />
+                <PurchaseGSTRegister data={transactionData} store={store} />
               )}
               {activeModule === AnalysisType.GSTR2B_RECONCILIATION && (
                 <GSTR2BReconciliation

@@ -4,6 +4,7 @@
 
 export { TallyStore } from './store';
 export * from './types';
+export * from './queries';
 export {
   toText, toNumber, toBool, toIsoDate, nameKey,
 } from './helpers';
