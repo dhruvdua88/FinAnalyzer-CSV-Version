@@ -1,799 +1,604 @@
-import React, { useEffect, useMemo, useState } from 'react';
+// Trial Balance — store-driven.
+//
+// Replaces the legacy 2-level (Primary → Parent → Ledger) TB with a full
+// recursive tree built from mst_group, plus three new audit-grade checks:
+//
+//   • Section 1: 3-way balance check banner (Opening / During / Closing)
+//   • Section 2: deep group hierarchy honouring mst_group.sort_position
+//   • Section 3: per-ledger reconciliation (opening + during == master closing)
+//   • Section 4: activity classification (dormant / active / new / closed)
+//
+// Data layer lives in services/tally/queries.ts (getTrialBalance). This
+// component is pure presentation + filtering + Excel export.
+
+import React, { useMemo, useState } from 'react';
+import {
+  Download, Search, ChevronDown, ChevronRight, AlertTriangle,
+  CheckCircle2, XCircle, Activity, Info,
+} from 'lucide-react';
 import { LedgerEntry } from '../../types';
-import { Download, Search, Layers, ChevronDown, ChevronRight } from 'lucide-react';
+import {
+  useTallyStore,
+  getTrialBalance,
+  type TrialBalanceResult,
+  type TbGroupNode,
+  type TbLedgerRow,
+  type TbActivity,
+  type TbBalanceCheck,
+  type TbActivityCounts,
+} from '../../services/tally';
 
 interface TrialBalanceAnalysisProps {
+  // Kept for backward compatibility with App.tsx prop wiring, but the new
+  // module reads everything from the TallyStore (via context).
   data: LedgerEntry[];
 }
 
-interface TrialBalanceRow {
-  ledger: string;
-  primary: string;
-  parent: string;
-  opening: number;
-  duringDr: number;
-  duringCr: number;
-  closing: number;
-}
+type ActivityFilter = 'all' | TbActivity;
 
-interface GroupNode {
-  rows: TrialBalanceRow[];
-  opening: number;
-  duringDr: number;
-  duringCr: number;
-  closing: number;
-}
-
-interface DrCrTotals {
-  openingDr: number;
-  openingCr: number;
-  duringDr: number;
-  duringCr: number;
-  closingDr: number;
-  closingCr: number;
-}
-
-const toNumber = (value: any): number => {
-  const parsed = Number(value ?? 0);
-  return Number.isFinite(parsed) ? parsed : 0;
+const ACTIVITY_BADGE: Record<TbActivity, { label: string; cls: string }> = {
+  dormant:      { label: 'Dormant',      cls: 'bg-slate-100 text-slate-700 border-slate-300' },
+  active:       { label: 'Active',       cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  new:          { label: 'New',          cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+  closed:       { label: 'Closed',       cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+  'never-used': { label: 'Never used',   cls: 'bg-slate-50 text-slate-400 border-slate-200' },
 };
 
-const splitDrCr = (value: number) => ({
-  dr: value < 0 ? Math.abs(value) : 0,
-  cr: value > 0 ? value : 0,
-});
+const formatINR = (n: number, opts?: { allowDash?: boolean }): string => {
+  if ((opts?.allowDash ?? true) && Math.abs(n) < 0.005) return '—';
+  return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
 
-const formatAmount = (value: number) =>
-  value.toLocaleString('en-IN', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
-const BALANCE_TOLERANCE = 0.005;
+const formatDDMMYYYY = (iso: string): string => {
+  if (!iso) return '';
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : iso;
+};
 
-const summarizeDrCrTotals = (rows: TrialBalanceRow[]): DrCrTotals => {
-  return rows.reduce(
-    (acc, row) => {
-      const opening = splitDrCr(row.opening);
-      const closing = splitDrCr(row.closing);
-      acc.openingDr += opening.dr;
-      acc.openingCr += opening.cr;
-      acc.duringDr += row.duringDr;
-      acc.duringCr += row.duringCr;
-      acc.closingDr += closing.dr;
-      acc.closingCr += closing.cr;
-      return acc;
-    },
-    {
-      openingDr: 0,
-      openingCr: 0,
-      duringDr: 0,
-      duringCr: 0,
-      closingDr: 0,
-      closingCr: 0,
+// Recursive filter helper. Returns a copy of the tree where each node only
+// contains ledgers/sub-groups that match. A node with no matching descendants
+// is dropped entirely.
+const filterTree = (
+  nodes: TbGroupNode[],
+  predicate: (row: TbLedgerRow) => boolean,
+): TbGroupNode[] => {
+  const out: TbGroupNode[] = [];
+  for (const node of nodes) {
+    const childLedgers = node.childLedgers.filter(predicate);
+    const childGroups = filterTree(node.childGroups, predicate);
+    if (childLedgers.length === 0 && childGroups.length === 0) continue;
+    // Rebuild rolled-up totals from kept children (so subtotals always reconcile)
+    const filtered: TbGroupNode = {
+      ...node,
+      childLedgers,
+      childGroups,
+      openingDr: 0, openingCr: 0,
+      duringDr: 0, duringCr: 0,
+      closingDr: 0, closingCr: 0,
+      ledgerCount: childLedgers.length + childGroups.reduce((s, g) => s + g.ledgerCount, 0),
+    };
+    for (const l of childLedgers) {
+      filtered.openingDr += l.openingDr; filtered.openingCr += l.openingCr;
+      filtered.duringDr  += l.duringDr;  filtered.duringCr  += l.duringCr;
+      filtered.closingDr += l.closingDr; filtered.closingCr += l.closingCr;
     }
-  );
-};
-
-const formatDdMmYyyy = (isoDate: string) => {
-  if (!isoDate) return '';
-  const safe = isoDate.trim().split('T')[0];
-  if (/^\d{4}-\d{2}-\d{2}$/.test(safe)) {
-    const [yyyy, mm, dd] = safe.split('-');
-    return `${dd}/${mm}/${yyyy}`;
+    for (const sg of childGroups) {
+      filtered.openingDr += sg.openingDr; filtered.openingCr += sg.openingCr;
+      filtered.duringDr  += sg.duringDr;  filtered.duringCr  += sg.duringCr;
+      filtered.closingDr += sg.closingDr; filtered.closingCr += sg.closingCr;
+    }
+    out.push(filtered);
   }
-  const parsed = new Date(safe);
-  if (Number.isNaN(parsed.getTime())) return safe;
-  const dd = String(parsed.getDate()).padStart(2, '0');
-  const mm = String(parsed.getMonth() + 1).padStart(2, '0');
-  const yyyy = parsed.getFullYear();
-  return `${dd}/${mm}/${yyyy}`;
+  return out;
 };
 
-const formatNowDdMmYyyyHm = (date: Date) => {
-  const dd = String(date.getDate()).padStart(2, '0');
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const yyyy = date.getFullYear();
-  const hh = String(date.getHours()).padStart(2, '0');
-  const min = String(date.getMinutes()).padStart(2, '0');
-  return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
-};
+const TrialBalanceAnalysis: React.FC<TrialBalanceAnalysisProps> = () => {
+  const store = useTallyStore();
 
-const isMasterLedgerEntry = (entry: LedgerEntry): boolean => {
-  const raw = entry?.is_master_ledger;
-  if (raw === undefined || raw === null || String(raw).trim() === '') return false;
-  const text = String(raw).trim().toLowerCase();
-  if (text === '1' || text === 'true' || text === 'yes' || text === 'y') return true;
-  if (text === '0' || text === 'false' || text === 'no' || text === 'n') return false;
-  const parsed = Number(text);
-  return Number.isFinite(parsed) ? parsed > 0 : false;
-};
-
-const TrialBalanceAnalysis: React.FC<TrialBalanceAnalysisProps> = ({ data }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [primaryFilter, setPrimaryFilter] = useState('all');
-  const [showOnlyActive, setShowOnlyActive] = useState(false);
-  const [collapsedPrimary, setCollapsedPrimary] = useState<Record<string, boolean>>({});
-  const [collapsedParent, setCollapsedParent] = useState<Record<string, boolean>>({});
+  const [primaryFilter, setPrimaryFilter] = useState<string>('all');
+  const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
+  const [reconFailOnly, setReconFailOnly] = useState(false);
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
-  const { rows, periodFrom, periodTo } = useMemo(() => {
-    const ledgerMap = new Map<string, TrialBalanceRow>();
-    let minDate = '';
-    let maxDate = '';
+  const tb = useMemo<TrialBalanceResult | null>(() => {
+    if (!store) return null;
+    return getTrialBalance(store);
+  }, [store]);
 
-    data.forEach((entry) => {
-      const ledger = (entry.Ledger || '').trim();
-      if (!ledger) return;
-      const isMaster = isMasterLedgerEntry(entry);
-
-      const primary = (entry.TallyPrimary || 'Unclassified').trim() || 'Unclassified';
-      const parent = (entry.TallyParent || entry.Group || 'Ungrouped').trim() || 'Ungrouped';
-
-      if (!ledgerMap.has(ledger)) {
-        ledgerMap.set(ledger, {
-          ledger,
-          primary,
-          parent,
-          opening: toNumber(entry.opening_balance),
-          duringDr: 0,
-          duringCr: 0,
-          closing: toNumber(entry.closing_balance),
-        });
-      }
-
-      const row = ledgerMap.get(ledger)!;
-      const opening = toNumber(entry.opening_balance);
-      const closing = toNumber(entry.closing_balance);
-      if (isMaster) {
-        // Master rows are authoritative for opening/closing balances.
-        row.opening = opening;
-        row.closing = closing;
-      } else {
-        const amount = toNumber(entry.amount);
-        if (amount < 0) row.duringDr += Math.abs(amount);
-        if (amount > 0) row.duringCr += amount;
-        if (row.opening === 0 && opening !== 0) row.opening = opening;
-        if (row.closing === 0 && closing !== 0) row.closing = closing;
-      }
-      if (!row.primary && primary) row.primary = primary;
-      if (!row.parent && parent) row.parent = parent;
-
-      if (!isMaster && entry.date) {
-        if (!minDate || entry.date < minDate) minDate = entry.date;
-        if (!maxDate || entry.date > maxDate) maxDate = entry.date;
-      }
-    });
-
-    const rows = Array.from(ledgerMap.values()).sort((a, b) =>
-      `${a.primary}|${a.parent}|${a.ledger}`.localeCompare(`${b.primary}|${b.parent}|${b.ledger}`)
-    );
-    return { rows, periodFrom: minDate, periodTo: maxDate };
-  }, [data]);
-
-  const primaryOptions = useMemo(
-    () => ['all', ...Array.from(new Set(rows.map((r) => r.primary))).sort()],
-    [rows]
+  const primaries = useMemo<string[]>(
+    () => (tb ? tb.tree.map((n) => n.name) : []),
+    [tb],
   );
 
-  const filteredRows = useMemo(() => {
-    return rows.filter((row) => {
-      const search = searchTerm.toLowerCase();
-      const matchesSearch =
-        !search ||
-        row.ledger.toLowerCase().includes(search) ||
-        row.parent.toLowerCase().includes(search) ||
-        row.primary.toLowerCase().includes(search);
-      const matchesPrimary = primaryFilter === 'all' || row.primary === primaryFilter;
-      const hasMovement = showOnlyActive ? row.duringDr !== 0 || row.duringCr !== 0 : true;
-      return matchesSearch && matchesPrimary && hasMovement;
-    });
-  }, [rows, searchTerm, primaryFilter, showOnlyActive]);
+  const filteredTree = useMemo<TbGroupNode[]>(() => {
+    if (!tb) return [];
+    const q = searchTerm.trim().toLowerCase();
+    const predicate = (row: TbLedgerRow): boolean => {
+      if (activityFilter !== 'all' && row.activity !== activityFilter) return false;
+      if (reconFailOnly && row.reconPass) return false;
+      if (!q) return true;
+      return (
+        row.ledger.toLowerCase().includes(q) ||
+        row.group.toLowerCase().includes(q) ||
+        row.primaryGroup.toLowerCase().includes(q) ||
+        row.gstin.toLowerCase().includes(q) ||
+        row.pan.toLowerCase().includes(q)
+      );
+    };
+    let tree = filterTree(tb.tree, predicate);
+    if (primaryFilter !== 'all') tree = tree.filter((n) => n.name === primaryFilter);
+    return tree;
+  }, [tb, searchTerm, primaryFilter, activityFilter, reconFailOnly]);
 
-  const grouped = useMemo(() => {
-    const primaryMap = new Map<string, { totals: GroupNode; parents: Map<string, GroupNode> }>();
-
-    filteredRows.forEach((row) => {
-      if (!primaryMap.has(row.primary)) {
-        primaryMap.set(row.primary, {
-          totals: { rows: [], opening: 0, duringDr: 0, duringCr: 0, closing: 0 },
-          parents: new Map<string, GroupNode>(),
-        });
-      }
-
-      const primaryGroup = primaryMap.get(row.primary)!;
-      if (!primaryGroup.parents.has(row.parent)) {
-        primaryGroup.parents.set(row.parent, { rows: [], opening: 0, duringDr: 0, duringCr: 0, closing: 0 });
-      }
-
-      const parentGroup = primaryGroup.parents.get(row.parent)!;
-      parentGroup.rows.push(row);
-      parentGroup.opening += row.opening;
-      parentGroup.duringDr += row.duringDr;
-      parentGroup.duringCr += row.duringCr;
-      parentGroup.closing += row.closing;
-
-      primaryGroup.totals.opening += row.opening;
-      primaryGroup.totals.duringDr += row.duringDr;
-      primaryGroup.totals.duringCr += row.duringCr;
-      primaryGroup.totals.closing += row.closing;
-    });
-
-    return Array.from(primaryMap.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([primary, group]) => ({
-        primary,
-        totals: group.totals,
-        parents: Array.from(group.parents.entries())
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([parent, node]) => ({ parent, ...node })),
-      }));
-  }, [filteredRows]);
-
-  const grandTotals = useMemo(() => summarizeDrCrTotals(filteredRows), [filteredRows]);
-
-  useEffect(() => {
-    setCollapsedPrimary((prev) => {
-      const next: Record<string, boolean> = {};
-      grouped.forEach((block) => {
-        next[block.primary] = prev[block.primary] ?? false;
-      });
-      return next;
-    });
-
-    setCollapsedParent((prev) => {
-      const next: Record<string, boolean> = {};
-      grouped.forEach((primaryBlock) => {
-        primaryBlock.parents.forEach((parentBlock) => {
-          const key = `${primaryBlock.primary}::${parentBlock.parent}`;
-          next[key] = prev[key] ?? false;
-        });
-      });
-      return next;
-    });
-  }, [grouped]);
+  const toggleNode = (path: string) =>
+    setCollapsed((prev) => ({ ...prev, [path]: !prev[path] }));
 
   const collapseAll = () => {
-    const nextPrimary: Record<string, boolean> = {};
-    const nextParent: Record<string, boolean> = {};
-    grouped.forEach((primaryBlock) => {
-      nextPrimary[primaryBlock.primary] = true;
-      primaryBlock.parents.forEach((parentBlock) => {
-        nextParent[`${primaryBlock.primary}::${parentBlock.parent}`] = true;
-      });
-    });
-    setCollapsedPrimary(nextPrimary);
-    setCollapsedParent(nextParent);
-  };
-
-  const expandAll = () => {
-    const nextPrimary: Record<string, boolean> = {};
-    const nextParent: Record<string, boolean> = {};
-    grouped.forEach((primaryBlock) => {
-      nextPrimary[primaryBlock.primary] = false;
-      primaryBlock.parents.forEach((parentBlock) => {
-        nextParent[`${primaryBlock.primary}::${parentBlock.parent}`] = false;
-      });
-    });
-    setCollapsedPrimary(nextPrimary);
-    setCollapsedParent(nextParent);
-  };
-
-  const exportTrialBalance = async () => {
-    try {
-      const XLSX = await import('xlsx-js-style');
-      const openingGrand = { dr: grandTotals.openingDr, cr: grandTotals.openingCr };
-      const closingGrand = { dr: grandTotals.closingDr, cr: grandTotals.closingCr };
-      const periodLabel =
-        periodFrom && periodTo ? `${formatDdMmYyyy(periodFrom)} to ${formatDdMmYyyy(periodTo)}` : 'N/A';
-
-      const aoa: any[][] = [];
-      const rowKind: Record<number, 'title' | 'meta' | 'summaryHeader' | 'summaryData' | 'header' | 'primary' | 'parent' | 'ledger' | 'parentSubtotal' | 'primarySubtotal' | 'grand' | 'blank'> = {};
-      const rowLevel: Record<number, number> = {};
-
-      const pushRow = (values: any[], kind: typeof rowKind[number], level?: number) => {
-        aoa.push(values);
-        const rowNo = aoa.length;
-        rowKind[rowNo] = kind;
-        if (typeof level === 'number') rowLevel[rowNo] = level;
-        return rowNo;
-      };
-
-      const now = new Date();
-      pushRow(['Trial Balance - Grouped by TallyPrimary and TallyParent', '', '', '', '', '', '', '', '', ''], 'title');
-      pushRow(['Grand Totals Summary', '', '', '', 'Opening Dr', 'Opening Cr', 'During Year Dr', 'During Year Cr', 'Closing Dr', 'Closing Cr'], 'summaryHeader');
-      pushRow(['All Filtered Groups', '', '', '', openingGrand.dr, openingGrand.cr, grandTotals.duringDr, grandTotals.duringCr, closingGrand.dr, closingGrand.cr], 'summaryData');
-      pushRow(['', '', '', '', '', '', '', '', '', ''], 'blank');
-      pushRow([`Data Period: ${periodLabel}`, '', '', '', '', '', '', '', '', ''], 'meta');
-      pushRow([`Generated On: ${formatNowDdMmYyyyHm(now)}`, '', '', '', '', '', '', '', '', ''], 'meta');
-      pushRow(['', '', '', '', '', '', '', '', '', ''], 'blank');
-      const detailHeaderRow = pushRow(
-        ['Level', 'Tally Primary', 'Tally Parent', 'Ledger', 'Opening Dr', 'Opening Cr', 'During Year Dr', 'During Year Cr', 'Closing Dr', 'Closing Cr'],
-        'header'
-      );
-
-      grouped.forEach((primaryBlock) => {
-        const primaryRows = primaryBlock.parents.flatMap((parentBlock) => parentBlock.rows);
-        const primaryTotals = summarizeDrCrTotals(primaryRows);
-        pushRow(
-          [
-            'PRIMARY',
-            primaryBlock.primary,
-            '',
-            '',
-            primaryTotals.openingDr,
-            primaryTotals.openingCr,
-            primaryTotals.duringDr,
-            primaryTotals.duringCr,
-            primaryTotals.closingDr,
-            primaryTotals.closingCr,
-          ],
-          'primary',
-          0
-        );
-
-        primaryBlock.parents.forEach((parentBlock) => {
-          const parentTotals = summarizeDrCrTotals(parentBlock.rows);
-          pushRow(
-            [
-              'PARENT',
-              primaryBlock.primary,
-              parentBlock.parent,
-              '',
-              parentTotals.openingDr,
-              parentTotals.openingCr,
-              parentTotals.duringDr,
-              parentTotals.duringCr,
-              parentTotals.closingDr,
-              parentTotals.closingCr,
-            ],
-            'parent',
-            1
-          );
-
-          parentBlock.rows.forEach((row) => {
-            const opening = splitDrCr(row.opening);
-            const closing = splitDrCr(row.closing);
-            pushRow(
-              ['LEDGER', row.primary, row.parent, row.ledger, opening.dr, opening.cr, row.duringDr, row.duringCr, closing.dr, closing.cr],
-              'ledger',
-              2
-            );
-          });
-
-          pushRow(
-            [
-              'PARENT SUBTOTAL',
-              primaryBlock.primary,
-              parentBlock.parent,
-              '',
-              parentTotals.openingDr,
-              parentTotals.openingCr,
-              parentTotals.duringDr,
-              parentTotals.duringCr,
-              parentTotals.closingDr,
-              parentTotals.closingCr,
-            ],
-            'parentSubtotal',
-            1
-          );
-        });
-
-        pushRow(
-          [
-            'PRIMARY SUBTOTAL',
-            primaryBlock.primary,
-            '',
-            '',
-            primaryTotals.openingDr,
-            primaryTotals.openingCr,
-            primaryTotals.duringDr,
-            primaryTotals.duringCr,
-            primaryTotals.closingDr,
-            primaryTotals.closingCr,
-          ],
-          'primarySubtotal',
-          0
-        );
-      });
-
-      pushRow(['', '', '', '', '', '', '', '', '', ''], 'blank');
-      pushRow(['GRAND TOTAL', '', '', '', openingGrand.dr, openingGrand.cr, grandTotals.duringDr, grandTotals.duringCr, closingGrand.dr, closingGrand.cr], 'grand');
-
-      const worksheet = XLSX.utils.aoa_to_sheet(aoa);
-
-      worksheet['!cols'] = [
-        { wch: 16 },
-        { wch: 28 },
-        { wch: 28 },
-        { wch: 36 },
-        { wch: 16 },
-        { wch: 16 },
-        { wch: 16 },
-        { wch: 16 },
-        { wch: 16 },
-        { wch: 16 },
-      ];
-
-      worksheet['!merges'] = [
-        { s: { r: 0, c: 0 }, e: { r: 0, c: 9 } },
-        { s: { r: 1, c: 0 }, e: { r: 1, c: 3 } },
-        { s: { r: 2, c: 0 }, e: { r: 2, c: 3 } },
-        { s: { r: 4, c: 0 }, e: { r: 4, c: 9 } },
-        { s: { r: 5, c: 0 }, e: { r: 5, c: 9 } },
-      ];
-
-      worksheet['!autofilter'] = { ref: `A${detailHeaderRow}:J${detailHeaderRow}` };
-      worksheet['!outline'] = { summaryBelow: true };
-
-      const rowsMeta: any[] = [];
-      for (let rowNo = 1; rowNo <= aoa.length; rowNo++) {
-        if (rowLevel[rowNo] !== undefined) rowsMeta[rowNo - 1] = { level: rowLevel[rowNo] };
+    if (!tb) return;
+    const next: Record<string, boolean> = {};
+    const walk = (nodes: TbGroupNode[], prefix: string) => {
+      for (const n of nodes) {
+        const path = prefix ? `${prefix}::${n.name}` : n.name;
+        next[path] = true;
+        walk(n.childGroups, path);
       }
-      worksheet['!rows'] = rowsMeta;
+    };
+    walk(tb.tree, '');
+    setCollapsed(next);
+  };
+  const expandAll = () => setCollapsed({});
 
-      const border = {
-        top: { style: 'thin', color: { rgb: 'CBD5E1' } },
-        right: { style: 'thin', color: { rgb: 'CBD5E1' } },
-        bottom: { style: 'thin', color: { rgb: 'CBD5E1' } },
-        left: { style: 'thin', color: { rgb: 'CBD5E1' } },
-      };
+  const handleExport = async () => {
+    if (!tb) return;
+    const XLSX = await import('xlsx-js-style');
+    const aoa: any[][] = [];
+    const periodLabel = tb.periodFrom && tb.periodTo ? `${formatDDMMYYYY(tb.periodFrom)} to ${formatDDMMYYYY(tb.periodTo)}` : 'All periods';
 
-      const rowStyleByKind: Record<string, any> = {
-        title: { fill: { fgColor: { rgb: 'F8FAFC' } }, font: { name: 'Calibri', sz: 15, bold: true, color: { rgb: '0F172A' } }, alignment: { horizontal: 'center', vertical: 'center' } },
-        meta: { fill: { fgColor: { rgb: 'FFFFFF' } }, font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '334155' } }, alignment: { horizontal: 'left', vertical: 'center' } },
-        summaryHeader: { fill: { fgColor: { rgb: 'E5E7EB' } }, font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: '0F172A' } }, alignment: { horizontal: 'center', vertical: 'center' } },
-        summaryData: { fill: { fgColor: { rgb: 'FFFFFF' } }, font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: '0F172A' } }, alignment: { horizontal: 'left', vertical: 'center' } },
-        header: { fill: { fgColor: { rgb: 'F1F5F9' } }, font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: '0F172A' } }, alignment: { horizontal: 'center', vertical: 'center' } },
-        primary: { fill: { fgColor: { rgb: 'F8FAFC' } }, font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: '0F172A' } }, alignment: { horizontal: 'left', vertical: 'center' } },
-        parent: { fill: { fgColor: { rgb: 'FFFFFF' } }, font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '0F172A' } }, alignment: { horizontal: 'left', vertical: 'center' } },
-        ledger: { fill: { fgColor: { rgb: 'FFFFFF' } }, font: { name: 'Calibri', sz: 10, color: { rgb: '0F172A' } }, alignment: { horizontal: 'left', vertical: 'center' } },
-        parentSubtotal: { fill: { fgColor: { rgb: 'F3F4F6' } }, font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '0F172A' } }, alignment: { horizontal: 'left', vertical: 'center' } },
-        primarySubtotal: { fill: { fgColor: { rgb: 'E5E7EB' } }, font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '0F172A' } }, alignment: { horizontal: 'left', vertical: 'center' } },
-        grand: { fill: { fgColor: { rgb: 'E2E8F0' } }, font: { name: 'Calibri', sz: 12, bold: true, color: { rgb: '0F172A' } }, alignment: { horizontal: 'left', vertical: 'center' } },
-        blank: { fill: { fgColor: { rgb: 'FFFFFF' } }, font: { name: 'Calibri', sz: 10, color: { rgb: '0F172A' } }, alignment: { horizontal: 'left', vertical: 'center' } },
-      };
+    aoa.push(['Trial Balance']);
+    aoa.push([`Period: ${periodLabel}`]);
+    aoa.push([`Generated: ${new Date().toLocaleString('en-IN')}`]);
+    aoa.push([]);
 
-      for (let r = 0; r < aoa.length; r++) {
-        const kind = rowKind[r + 1] || 'ledger';
-        for (let c = 0; c < 10; c++) {
-          const ref = XLSX.utils.encode_cell({ r, c });
-          if (!worksheet[ref]) continue;
+    // Balance check
+    aoa.push(['Balance Check', '', 'Dr', 'Cr', 'Delta', 'Status']);
+    for (const [k, v] of [
+      ['Opening', tb.balanceCheck.opening],
+      ['During',  tb.balanceCheck.during],
+      ['Closing', tb.balanceCheck.closing],
+    ] as const) {
+      aoa.push([k, '', v.dr, v.cr, v.delta, v.ok ? 'PASS' : 'REVIEW']);
+    }
+    aoa.push([]);
 
-          const isNumber = c >= 4 && typeof worksheet[ref].v === 'number';
-          const styleBase = rowStyleByKind[kind] || rowStyleByKind.ledger;
-          const style: any = {
-            ...styleBase,
-            border,
-          };
+    // Activity counts
+    aoa.push(['Activity Summary']);
+    for (const [k, v] of Object.entries(tb.activityCounts)) aoa.push([k, '', v]);
+    aoa.push([]);
 
-          if (isNumber) {
-            style.numFmt = '#,##0.00';
-            style.alignment = { ...(style.alignment || {}), horizontal: 'right' };
-          }
-
-          worksheet[ref].s = style;
+    // Detail tree
+    aoa.push(['Level', 'Group / Ledger', 'Activity', 'Recon', 'Opening Dr', 'Opening Cr', 'During Dr', 'During Cr', 'Closing Dr', 'Closing Cr']);
+    const walk = (nodes: TbGroupNode[]) => {
+      for (const n of nodes) {
+        aoa.push([
+          n.level === 0 ? 'PRIMARY' : `L${n.level}`,
+          `${'  '.repeat(n.level)}${n.name}  (${n.ledgerCount})`,
+          '', '',
+          n.openingDr, n.openingCr, n.duringDr, n.duringCr, n.closingDr, n.closingCr,
+        ]);
+        walk(n.childGroups);
+        for (const l of n.childLedgers) {
+          aoa.push([
+            `L${n.level + 1}`,
+            `${'  '.repeat(n.level + 1)}${l.ledger}`,
+            l.activity,
+            l.reconPass ? 'PASS' : `FAIL Δ${l.reconDelta.toFixed(2)}`,
+            l.openingDr, l.openingCr, l.duringDr, l.duringCr, l.closingDr, l.closingCr,
+          ]);
         }
       }
+    };
+    walk(filteredTree);
 
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, worksheet, 'Trial Balance');
+    aoa.push([]);
+    aoa.push([
+      'GRAND TOTAL', '', '', '',
+      tb.grandTotals.openingDr, tb.grandTotals.openingCr,
+      tb.grandTotals.duringDr,  tb.grandTotals.duringCr,
+      tb.grandTotals.closingDr, tb.grandTotals.closingCr,
+    ]);
 
-      const stamp = `${String(now.getDate()).padStart(2, '0')}-${String(now.getMonth() + 1).padStart(2, '0')}-${now.getFullYear()}`;
-      XLSX.writeFile(workbook, `Trial_Balance_${stamp}.xlsx`, { compression: true });
-    } catch (error) {
-      console.error(error);
-      window.alert('Unable to export Trial Balance Excel. Please retry.');
+    if (tb.reconciliationFailures.length > 0) {
+      aoa.push([]);
+      aoa.push([`Reconciliation Failures (${tb.reconciliationFailures.length})`]);
+      aoa.push(['Ledger', 'Group', 'Opening', 'During Net', 'Calc Closing', 'Master Closing', 'Delta']);
+      for (const r of tb.reconciliationFailures) {
+        aoa.push([r.ledger, r.group, r.openingSigned, r.duringNet, r.closingCalculated, r.closingSigned, r.reconDelta]);
+      }
     }
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = [{ wch: 10 }, { wch: 40 }, { wch: 12 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Trial Balance');
+    const stamp = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `Trial_Balance_${stamp}.xlsx`, { compression: true, cellStyles: true });
   };
 
-  const openingTotals = { dr: grandTotals.openingDr, cr: grandTotals.openingCr };
-  const closingTotals = { dr: grandTotals.closingDr, cr: grandTotals.closingCr };
-  const openingDifference = Math.abs(openingTotals.dr - openingTotals.cr);
-  const closingDifference = Math.abs(closingTotals.dr - closingTotals.cr);
-  const hasOpeningDifference = openingDifference > BALANCE_TOLERANCE;
-  const hasClosingDifference = closingDifference > BALANCE_TOLERANCE;
-  const hasAnyDifference = hasOpeningDifference || hasClosingDifference;
-
-  return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Ledgers</p>
-          <p className="text-3xl font-black text-slate-900 mt-1">{filteredRows.length}</p>
+  // ── Empty / fallback states ────────────────────────────────────────────────
+  if (!store) {
+    return (
+      <div className="bg-white border border-amber-200 rounded-2xl p-8 shadow-sm flex gap-4 items-start">
+        <div className="shrink-0 w-12 h-12 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center">
+          <Info size={24} />
         </div>
-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Opening</p>
-          <p className="text-sm font-black text-red-600 mt-1">Dr {formatAmount(openingTotals.dr)}</p>
-          <p className="text-sm font-black text-green-700 mt-0.5">Cr {formatAmount(openingTotals.cr)}</p>
-        </div>
-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-wider text-slate-400">During Year</p>
-          <p className="text-sm font-black text-red-600 mt-1">Dr {formatAmount(grandTotals.duringDr)}</p>
-          <p className="text-sm font-black text-green-700 mt-0.5">Cr {formatAmount(grandTotals.duringCr)}</p>
-        </div>
-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Closing</p>
-          <p className="text-sm font-black text-red-600 mt-1">Dr {formatAmount(closingTotals.dr)}</p>
-          <p className="text-sm font-black text-green-700 mt-0.5">Cr {formatAmount(closingTotals.cr)}</p>
-        </div>
-        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
-          <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Data Period</p>
-          <p className="text-sm font-bold text-slate-800 mt-2">
-            {periodFrom && periodTo ? `${formatDdMmYyyy(periodFrom)} to ${formatDdMmYyyy(periodTo)}` : 'N/A'}
+        <div>
+          <h2 className="text-lg font-bold text-slate-900">Tally Excel Export (ZIP) required</h2>
+          <p className="text-sm text-slate-600 mt-1 leading-relaxed">
+            The Trial Balance reads <code>mst_group</code>, <code>mst_ledger</code> and{' '}
+            <code>trn_accounting</code> directly so it can run the balance-equation check, walk the
+            full group hierarchy and reconcile every ledger to its master closing balance. Import
+            via <strong>Import Tally Excel Export (ZIP)</strong> from the upload screen.
           </p>
         </div>
       </div>
+    );
+  }
+  if (!tb) return null;
 
-      <div
-        className={`rounded-xl border px-5 py-3 ${
-          hasAnyDifference ? 'border-rose-200 bg-rose-50' : 'border-emerald-200 bg-emerald-50'
-        }`}
-      >
-        <p className={`text-sm font-black ${hasAnyDifference ? 'text-rose-800' : 'text-emerald-800'}`}>
-          {hasAnyDifference
-            ? 'Trial Balance Difference Detected (Opening/Closing)'
-            : 'Opening and Closing balances are matched (Dr = Cr)'}
-        </p>
-        <div className={`mt-1 text-xs font-semibold ${hasAnyDifference ? 'text-rose-700' : 'text-emerald-700'}`}>
-          <span>Opening Difference: {formatAmount(openingDifference)}</span>
-          <span className="mx-2">|</span>
-          <span>Closing Difference: {formatAmount(closingDifference)}</span>
+  return (
+    <div className="space-y-5">
+      {/* ── Section 1: Balance check banner ───────────────────────────── */}
+      <BalanceCheckBanner check={tb.balanceCheck} period={[tb.periodFrom, tb.periodTo]} />
+
+      {/* ── Section 4: Activity summary chips + recon chip ────────────── */}
+      <SummaryChips
+        counts={tb.activityCounts}
+        active={activityFilter}
+        onSelect={(a) => setActivityFilter(a === activityFilter ? 'all' : a)}
+        reconFailures={tb.reconciliationFailures.length}
+        reconActive={reconFailOnly}
+        onReconToggle={() => setReconFailOnly((p) => !p)}
+      />
+
+      {/* ── Filter / search / export bar ──────────────────────────────── */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-center gap-3 shadow-sm">
+        <div className="relative flex-1 min-w-[280px]">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
+            placeholder="Search ledger, group, GSTIN, PAN…"
+            className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+          />
         </div>
+        <select value={primaryFilter} onChange={(e) => setPrimaryFilter(e.target.value)}
+          className="px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+          <option value="all">All primary groups</option>
+          {primaries.map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+        <button onClick={expandAll} className="px-3 py-2 text-xs font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50">
+          Expand all
+        </button>
+        <button onClick={collapseAll} className="px-3 py-2 text-xs font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50">
+          Collapse all
+        </button>
+        <button onClick={handleExport}
+          className="ml-auto px-4 py-2 inline-flex items-center gap-2 text-sm font-bold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm">
+          <Download size={15} />
+          Export Excel
+        </button>
       </div>
 
-      <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4">
-        <div className="flex flex-col lg:flex-row gap-3">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-2.5 text-slate-400" size={16} />
-            <input
-              type="text"
-              placeholder="Search ledger, parent, or primary..."
-              className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-          </div>
-          <select
-            className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white"
-            value={primaryFilter}
-            onChange={(e) => setPrimaryFilter(e.target.value)}
-          >
-            {primaryOptions.map((option) => (
-              <option key={option} value={option}>
-            {option === 'all' ? 'All Primary Groups' : option}
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={() => setShowOnlyActive((v) => !v)}
-            className={`px-4 py-2 rounded-lg text-sm font-bold border transition-colors ${
-              showOnlyActive
-                ? 'bg-indigo-50 border-indigo-300 text-indigo-700'
-                : 'bg-white border-slate-300 text-slate-600'
-            }`}
-          >
-            {showOnlyActive ? 'Only Active: ON' : 'Only Active: OFF'}
-          </button>
-          <button
-            onClick={expandAll}
-            className="px-4 py-2 rounded-lg text-sm font-bold border border-slate-300 text-slate-700 bg-white hover:bg-slate-50"
-          >
-            Expand All
-          </button>
-          <button
-            onClick={collapseAll}
-            className="px-4 py-2 rounded-lg text-sm font-bold border border-slate-300 text-slate-700 bg-white hover:bg-slate-50"
-          >
-            Collapse All
-          </button>
-          <button
-            onClick={exportTrialBalance}
-            className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold hover:bg-emerald-700 flex items-center gap-2"
-          >
-            <Download size={16} />
-            Export Excel
-          </button>
-        </div>
-        <p className="text-xs text-slate-500">
-          Source filter: accounting vouchers only (`is_accounting_voucher = 1`).
-        </p>
-      </div>
-
-      {grouped.length === 0 ? (
-        <div className="bg-white p-16 rounded-xl border border-slate-200 shadow-sm text-center text-slate-400">
-          No trial balance rows match current filters.
+      {/* ── Section 2 + 3: Group tree with recon column ──────────────── */}
+      {filteredTree.length === 0 ? (
+        <div className="bg-white border border-slate-200 rounded-xl p-12 text-center text-slate-400 text-sm">
+          No ledgers match the current filters.
         </div>
       ) : (
-        <div className="space-y-5">
-          {grouped.map((primaryBlock) => {
-            const primaryTotals = summarizeDrCrTotals(primaryBlock.parents.flatMap((parentBlock) => parentBlock.rows));
-            const primaryKey = primaryBlock.primary;
-            const primaryIsCollapsed = collapsedPrimary[primaryKey] ?? false;
-            const primaryLedgerCount = primaryBlock.parents.reduce((acc, parentBlock) => acc + parentBlock.rows.length, 0);
-            return (
-              <div key={primaryBlock.primary} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                <div className="px-5 py-4 bg-indigo-50 border-b border-indigo-100 space-y-3">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <button
-                      onClick={() =>
-                        setCollapsedPrimary((prev) => ({
-                          ...prev,
-                          [primaryKey]: !primaryIsCollapsed,
-                        }))
-                      }
-                      className="flex items-center gap-2 text-left"
-                    >
-                      {primaryIsCollapsed ? (
-                        <ChevronRight size={16} className="text-indigo-600" />
-                      ) : (
-                        <ChevronDown size={16} className="text-indigo-600" />
-                      )}
-                      <Layers size={16} className="text-indigo-600" />
-                      <h3 className="text-lg font-black text-indigo-900">{primaryBlock.primary}</h3>
-                    </button>
-                    <p className="text-xs font-semibold text-indigo-700">
-                      {primaryBlock.parents.length} parents | {primaryLedgerCount} ledgers
-                    </p>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-[760px] text-[11px]">
-                      <thead className="text-indigo-700 uppercase tracking-wide">
-                        <tr>
-                          <th className="px-2 py-1 text-right">Opening Dr</th>
-                          <th className="px-2 py-1 text-right">Opening Cr</th>
-                          <th className="px-2 py-1 text-right">During Dr</th>
-                          <th className="px-2 py-1 text-right">During Cr</th>
-                          <th className="px-2 py-1 text-right">Closing Dr</th>
-                          <th className="px-2 py-1 text-right">Closing Cr</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr className="font-black text-indigo-900">
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.openingDr)}</td>
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.openingCr)}</td>
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.duringDr)}</td>
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.duringCr)}</td>
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.closingDr)}</td>
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.closingCr)}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
+        <div className="space-y-3">
+          {filteredTree.map((node) => (
+            <GroupTreeNode
+              key={node.name} node={node}
+              collapsed={collapsed} onToggle={toggleNode} path={node.name}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Grand total footer */}
+      <div className="bg-slate-900 text-white rounded-xl shadow-sm overflow-x-auto">
+        <table className="w-full text-xs">
+          <tbody>
+            <tr className="font-bold">
+              <td className="px-4 py-3 w-[280px]">GRAND TOTAL — All Filtered Groups</td>
+              <td className="px-4 py-3 text-right tabular-nums">{formatINR(tb.grandTotals.openingDr)}</td>
+              <td className="px-4 py-3 text-right tabular-nums">{formatINR(tb.grandTotals.openingCr)}</td>
+              <td className="px-4 py-3 text-right tabular-nums">{formatINR(tb.grandTotals.duringDr)}</td>
+              <td className="px-4 py-3 text-right tabular-nums">{formatINR(tb.grandTotals.duringCr)}</td>
+              <td className="px-4 py-3 text-right tabular-nums">{formatINR(tb.grandTotals.closingDr)}</td>
+              <td className="px-4 py-3 text-right tabular-nums">{formatINR(tb.grandTotals.closingCr)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* Reconciliation failures detail (Section 3) */}
+      {tb.reconciliationFailures.length > 0 && (
+        <ReconFailuresPanel rows={tb.reconciliationFailures} />
+      )}
+    </div>
+  );
+};
+
+// ─── Section 1: Balance Check Banner ──────────────────────────────────────────
+
+const BalanceCheckBanner: React.FC<{ check: TbBalanceCheck; period: [string, string] }> = ({ check, period }) => {
+  const allOk = check.opening.ok && check.during.ok && check.closing.ok;
+  const periodLabel = period[0] && period[1] ? `${formatDDMMYYYY(period[0])} → ${formatDDMMYYYY(period[1])}` : 'All periods loaded';
+
+  return (
+    <div className={`rounded-2xl border-2 shadow-sm overflow-hidden ${allOk ? 'border-emerald-300 bg-emerald-50' : 'border-amber-300 bg-amber-50'}`}>
+      <div className={`px-5 py-3 flex items-center justify-between ${allOk ? 'bg-emerald-100' : 'bg-amber-100'}`}>
+        <div className="flex items-center gap-3">
+          {allOk ? <CheckCircle2 size={22} className="text-emerald-700" />
+                 : <AlertTriangle size={22} className="text-amber-700" />}
+          <div>
+            <h3 className={`font-black text-sm ${allOk ? 'text-emerald-900' : 'text-amber-900'}`}>
+              {allOk ? 'Trial Balance reconciles end-to-end' : 'Trial Balance has unbalanced sections — review below'}
+            </h3>
+            <p className={`text-[11px] ${allOk ? 'text-emerald-700' : 'text-amber-700'}`}>
+              Period: {periodLabel} · Tolerance ₹{check.tolerance.toFixed(2)}
+            </p>
+          </div>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3">
+        {(['opening', 'during', 'closing'] as const).map((k) => {
+          const c = check[k];
+          return (
+            <div key={k} className={`p-4 border-t md:border-t-0 md:border-l first:md:border-l-0 border-slate-200 bg-white`}>
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">{k}</p>
+                {c.ok ? <CheckCircle2 size={14} className="text-emerald-600" />
+                      : <XCircle size={14} className="text-red-600" />}
+              </div>
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                <div>
+                  <p className="text-[10px] text-slate-400 font-semibold">Dr</p>
+                  <p className="text-sm font-bold tabular-nums">{formatINR(c.dr, { allowDash: false })}</p>
                 </div>
-
-                {!primaryIsCollapsed &&
-                  primaryBlock.parents.map((parentBlock) => {
-                  const parentTotals = summarizeDrCrTotals(parentBlock.rows);
-                  const parentKey = `${primaryBlock.primary}::${parentBlock.parent}`;
-                  const parentIsCollapsed = collapsedParent[parentKey] ?? false;
-                  return (
-                    <div key={`${primaryBlock.primary}-${parentBlock.parent}`} className="border-b border-slate-100 last:border-b-0">
-                      <div className="px-5 py-3 bg-slate-50 border-b border-slate-100 space-y-2">
-                        <div className="flex justify-between items-center gap-3 flex-wrap">
-                          <button
-                            onClick={() =>
-                              setCollapsedParent((prev) => ({
-                                ...prev,
-                                [parentKey]: !parentIsCollapsed,
-                              }))
-                            }
-                            className="flex items-center gap-2 text-left"
-                          >
-                            {parentIsCollapsed ? (
-                              <ChevronRight size={15} className="text-slate-500" />
-                            ) : (
-                              <ChevronDown size={15} className="text-slate-500" />
-                            )}
-                            <p className="text-sm font-bold text-slate-800">{parentBlock.parent}</p>
-                          </button>
-                          <p className="text-[11px] font-semibold text-slate-500">{parentBlock.rows.length} ledgers</p>
-                        </div>
-                        <div className="overflow-x-auto">
-                          <table className="min-w-[760px] text-[11px]">
-                            <thead className="text-slate-500 uppercase tracking-wide">
-                              <tr>
-                                <th className="px-2 py-1 text-right">Opening Dr</th>
-                                <th className="px-2 py-1 text-right">Opening Cr</th>
-                                <th className="px-2 py-1 text-right">During Dr</th>
-                                <th className="px-2 py-1 text-right">During Cr</th>
-                                <th className="px-2 py-1 text-right">Closing Dr</th>
-                                <th className="px-2 py-1 text-right">Closing Cr</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              <tr className="font-bold text-slate-700">
-                                <td className="px-2 py-1 text-right">{formatAmount(parentTotals.openingDr)}</td>
-                                <td className="px-2 py-1 text-right">{formatAmount(parentTotals.openingCr)}</td>
-                                <td className="px-2 py-1 text-right">{formatAmount(parentTotals.duringDr)}</td>
-                                <td className="px-2 py-1 text-right">{formatAmount(parentTotals.duringCr)}</td>
-                                <td className="px-2 py-1 text-right">{formatAmount(parentTotals.closingDr)}</td>
-                                <td className="px-2 py-1 text-right">{formatAmount(parentTotals.closingCr)}</td>
-                              </tr>
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                      {!parentIsCollapsed && (
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-sm">
-                            <thead className="bg-white text-slate-500 text-[11px] font-bold uppercase border-b border-slate-100">
-                              <tr>
-                                <th className="px-4 py-3 text-left">Ledger</th>
-                                <th className="px-4 py-3 text-right">Opening Dr</th>
-                                <th className="px-4 py-3 text-right">Opening Cr</th>
-                                <th className="px-4 py-3 text-right">During Year Dr</th>
-                                <th className="px-4 py-3 text-right">During Year Cr</th>
-                                <th className="px-4 py-3 text-right">Closing Dr</th>
-                                <th className="px-4 py-3 text-right">Closing Cr</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100">
-                              {parentBlock.rows.map((row) => {
-                                const opening = splitDrCr(row.opening);
-                                const closing = splitDrCr(row.closing);
-                                return (
-                                  <tr key={`${row.primary}-${row.parent}-${row.ledger}`} className="hover:bg-slate-50">
-                                    <td className="px-4 py-3 font-semibold text-slate-800">{row.ledger}</td>
-                                    <td className="px-4 py-3 text-right font-mono">{opening.dr ? formatAmount(opening.dr) : '-'}</td>
-                                    <td className="px-4 py-3 text-right font-mono">{opening.cr ? formatAmount(opening.cr) : '-'}</td>
-                                    <td className="px-4 py-3 text-right font-mono text-red-700">
-                                      {row.duringDr ? formatAmount(row.duringDr) : '-'}
-                                    </td>
-                                    <td className="px-4 py-3 text-right font-mono text-green-700">
-                                      {row.duringCr ? formatAmount(row.duringCr) : '-'}
-                                    </td>
-                                    <td className="px-4 py-3 text-right font-mono">{closing.dr ? formatAmount(closing.dr) : '-'}</td>
-                                    <td className="px-4 py-3 text-right font-mono">{closing.cr ? formatAmount(closing.cr) : '-'}</td>
-                                  </tr>
-                                );
-                              })}
-                              <tr className="bg-slate-50 font-bold text-slate-700">
-                                <td className="px-4 py-3">Parent Total</td>
-                                <td className="px-4 py-3 text-right font-mono">{parentTotals.openingDr ? formatAmount(parentTotals.openingDr) : '-'}</td>
-                                <td className="px-4 py-3 text-right font-mono">{parentTotals.openingCr ? formatAmount(parentTotals.openingCr) : '-'}</td>
-                                <td className="px-4 py-3 text-right font-mono">{parentTotals.duringDr ? formatAmount(parentTotals.duringDr) : '-'}</td>
-                                <td className="px-4 py-3 text-right font-mono">{parentTotals.duringCr ? formatAmount(parentTotals.duringCr) : '-'}</td>
-                                <td className="px-4 py-3 text-right font-mono">{parentTotals.closingDr ? formatAmount(parentTotals.closingDr) : '-'}</td>
-                                <td className="px-4 py-3 text-right font-mono">{parentTotals.closingCr ? formatAmount(parentTotals.closingCr) : '-'}</td>
-                              </tr>
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-
-                <div className="px-5 py-3 bg-indigo-100 border-t border-indigo-200 space-y-2">
-                  <p className="text-sm font-black text-indigo-900">Primary Total</p>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-[760px] text-[11px]">
-                      <thead className="text-indigo-700 uppercase tracking-wide">
-                        <tr>
-                          <th className="px-2 py-1 text-right">Opening Dr</th>
-                          <th className="px-2 py-1 text-right">Opening Cr</th>
-                          <th className="px-2 py-1 text-right">During Dr</th>
-                          <th className="px-2 py-1 text-right">During Cr</th>
-                          <th className="px-2 py-1 text-right">Closing Dr</th>
-                          <th className="px-2 py-1 text-right">Closing Cr</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr className="font-black text-indigo-900">
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.openingDr)}</td>
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.openingCr)}</td>
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.duringDr)}</td>
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.duringCr)}</td>
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.closingDr)}</td>
-                          <td className="px-2 py-1 text-right">{formatAmount(primaryTotals.closingCr)}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
+                <div>
+                  <p className="text-[10px] text-slate-400 font-semibold">Cr</p>
+                  <p className="text-sm font-bold tabular-nums">{formatINR(c.cr, { allowDash: false })}</p>
                 </div>
               </div>
-            );
-          })}
+              <p className={`text-[11px] mt-2 font-bold tabular-nums ${c.ok ? 'text-emerald-700' : 'text-red-700'}`}>
+                Δ {c.delta >= 0 ? '+' : ''}{formatINR(c.delta, { allowDash: false })}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// ─── Section 4: Activity + Recon summary chips ────────────────────────────────
+
+const SummaryChips: React.FC<{
+  counts: TbActivityCounts;
+  active: ActivityFilter;
+  onSelect: (a: ActivityFilter) => void;
+  reconFailures: number;
+  reconActive: boolean;
+  onReconToggle: () => void;
+}> = ({ counts, active, onSelect, reconFailures, reconActive, onReconToggle }) => {
+  const items: Array<{ key: TbActivity | 'all'; label: string; n: number; cls: string }> = [
+    { key: 'all',        label: 'All',        n: counts.dormant + counts.active + counts.new + counts.closed + counts['never-used'], cls: 'bg-slate-100 text-slate-700 border-slate-300' },
+    { key: 'active',     label: 'Active',     n: counts.active,        cls: ACTIVITY_BADGE.active.cls },
+    { key: 'new',        label: 'New',        n: counts.new,           cls: ACTIVITY_BADGE.new.cls },
+    { key: 'dormant',    label: 'Dormant',    n: counts.dormant,       cls: ACTIVITY_BADGE.dormant.cls },
+    { key: 'closed',     label: 'Closed',     n: counts.closed,        cls: ACTIVITY_BADGE.closed.cls },
+    { key: 'never-used', label: 'Never used', n: counts['never-used'], cls: ACTIVITY_BADGE['never-used'].cls },
+  ];
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl p-3 flex flex-wrap items-center gap-2 shadow-sm">
+      <div className="flex items-center gap-1.5 mr-2 text-slate-500">
+        <Activity size={14} />
+        <span className="text-[11px] font-bold uppercase tracking-wider">Activity</span>
+      </div>
+      {items.map((i) => (
+        <button key={i.key} onClick={() => onSelect(i.key as ActivityFilter)}
+          className={`px-3 py-1.5 rounded-full border text-xs font-bold transition-all ${i.cls} ${active === i.key ? 'ring-2 ring-offset-1 ring-indigo-400' : 'opacity-80 hover:opacity-100'}`}>
+          {i.label} · {i.n}
+        </button>
+      ))}
+      <button onClick={onReconToggle}
+        className={`ml-auto px-3 py-1.5 rounded-full border text-xs font-bold transition-all ${
+          reconFailures === 0
+            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 opacity-80 cursor-default'
+            : reconActive
+              ? 'bg-red-600 text-white border-red-700'
+              : 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
+        }`}
+        disabled={reconFailures === 0}>
+        {reconFailures === 0 ? '✓ Recon clean' : `⚠ ${reconFailures} recon failure${reconFailures === 1 ? '' : 's'}`}
+      </button>
+    </div>
+  );
+};
+
+// ─── Section 2: Recursive group node ──────────────────────────────────────────
+
+const GroupTreeNode: React.FC<{
+  node: TbGroupNode;
+  path: string;
+  collapsed: Record<string, boolean>;
+  onToggle: (path: string) => void;
+}> = ({ node, path, collapsed, onToggle }) => {
+  const isCollapsed = collapsed[path] ?? (node.level >= 2); // auto-collapse deep nodes
+  const hasChildren = node.childGroups.length > 0 || node.childLedgers.length > 0;
+
+  const headerBg = node.level === 0
+    ? 'bg-indigo-50 border-indigo-100'
+    : node.level === 1
+      ? 'bg-slate-100 border-slate-200'
+      : 'bg-slate-50 border-slate-100';
+  const headerText = node.level === 0 ? 'text-indigo-900 font-black' : 'text-slate-800 font-bold';
+  const indent = node.level * 16;
+
+  return (
+    <div className={`rounded-lg border ${node.level === 0 ? 'border-slate-200 shadow-sm' : 'border-transparent'} overflow-hidden`}>
+      <div className={`flex items-center gap-2 px-3 py-2 border-b ${headerBg}`} style={{ paddingLeft: 12 + indent }}>
+        <button onClick={() => onToggle(path)} className="flex items-center gap-1.5">
+          {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+          <span className={`text-xs ${headerText}`}>{node.name}</span>
+          {node.isReserved && <span className="text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">system</span>}
+        </button>
+        <span className="text-[10px] text-slate-500">
+          {node.ledgerCount} ledger{node.ledgerCount === 1 ? '' : 's'}
+          {node.childGroups.length > 0 && ` · ${node.childGroups.length} sub-group${node.childGroups.length === 1 ? '' : 's'}`}
+        </span>
+        <div className="ml-auto flex items-center gap-4 text-[11px] font-mono tabular-nums">
+          <span title="Opening Dr / Cr">
+            <span className="text-slate-500">Op</span>{' '}
+            <span className="text-rose-600">{formatINR(node.openingDr)}</span>{' / '}
+            <span className="text-emerald-600">{formatINR(node.openingCr)}</span>
+          </span>
+          <span title="During Dr / Cr">
+            <span className="text-slate-500">Dur</span>{' '}
+            <span className="text-rose-600">{formatINR(node.duringDr)}</span>{' / '}
+            <span className="text-emerald-600">{formatINR(node.duringCr)}</span>
+          </span>
+          <span title="Closing Dr / Cr" className="font-bold">
+            <span className="text-slate-500 font-semibold">Cl</span>{' '}
+            <span className="text-rose-700">{formatINR(node.closingDr)}</span>{' / '}
+            <span className="text-emerald-700">{formatINR(node.closingCr)}</span>
+          </span>
+        </div>
+      </div>
+
+      {!isCollapsed && hasChildren && (
+        <div>
+          {/* Sub-groups first (recursive) */}
+          {node.childGroups.map((sg) => (
+            <GroupTreeNode key={sg.name} node={sg} path={`${path}::${sg.name}`} collapsed={collapsed} onToggle={onToggle} />
+          ))}
+
+          {/* Ledger leaves */}
+          {node.childLedgers.length > 0 && (
+            <div className="overflow-x-auto bg-white">
+              <table className="w-full text-xs">
+                <thead className="text-slate-500 text-[10px] font-bold uppercase border-b border-slate-100">
+                  <tr>
+                    <th className="px-4 py-2 text-left" style={{ paddingLeft: 24 + indent }}>Ledger</th>
+                    <th className="px-3 py-2 text-left">Activity</th>
+                    <th className="px-3 py-2 text-left">Recon</th>
+                    <th className="px-3 py-2 text-right">Opening Dr</th>
+                    <th className="px-3 py-2 text-right">Opening Cr</th>
+                    <th className="px-3 py-2 text-right">During Dr</th>
+                    <th className="px-3 py-2 text-right">During Cr</th>
+                    <th className="px-3 py-2 text-right">Closing Dr</th>
+                    <th className="px-3 py-2 text-right">Closing Cr</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {node.childLedgers.map((row) => (
+                    <LedgerRowView key={row.ledger} row={row} indent={indent} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 };
+
+const LedgerRowView: React.FC<{ row: TbLedgerRow; indent: number }> = ({ row, indent }) => {
+  const badge = ACTIVITY_BADGE[row.activity];
+  return (
+    <tr className={`hover:bg-slate-50 ${row.activity === 'never-used' ? 'opacity-50' : ''}`}>
+      <td className="px-4 py-2 font-medium text-slate-800" style={{ paddingLeft: 24 + indent }}>
+        <div>{row.ledger}</div>
+        {(row.gstin || row.pan) && (
+          <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+            {row.gstin && <span>GSTIN: {row.gstin}</span>}
+            {row.gstin && row.pan && <span> · </span>}
+            {row.pan && <span>PAN: {row.pan}</span>}
+            {row.mailingState && <span> · {row.mailingState}</span>}
+          </div>
+        )}
+      </td>
+      <td className="px-3 py-2">
+        <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold border ${badge.cls}`}>
+          {badge.label}
+        </span>
+      </td>
+      <td className="px-3 py-2">
+        {row.reconPass
+          ? <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700">
+              <CheckCircle2 size={11} /> PASS
+            </span>
+          : <span className="inline-flex items-center gap-1 text-[10px] font-bold text-red-700" title={`Calc closing ${row.closingCalculated.toFixed(2)} vs master ${row.closingSigned.toFixed(2)}`}>
+              <XCircle size={11} /> FAIL Δ{row.reconDelta >= 0 ? '+' : ''}{row.reconDelta.toFixed(2)}
+            </span>
+        }
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">{formatINR(row.openingDr)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{formatINR(row.openingCr)}</td>
+      <td className="px-3 py-2 text-right tabular-nums text-rose-600">{formatINR(row.duringDr)}</td>
+      <td className="px-3 py-2 text-right tabular-nums text-emerald-600">{formatINR(row.duringCr)}</td>
+      <td className="px-3 py-2 text-right tabular-nums font-bold">{formatINR(row.closingDr)}</td>
+      <td className="px-3 py-2 text-right tabular-nums font-bold">{formatINR(row.closingCr)}</td>
+    </tr>
+  );
+};
+
+// ─── Section 3: Reconciliation failures detail panel ──────────────────────────
+
+const ReconFailuresPanel: React.FC<{ rows: TbLedgerRow[] }> = ({ rows }) => (
+  <details className="bg-red-50 border border-red-200 rounded-xl overflow-hidden" open>
+    <summary className="px-4 py-3 cursor-pointer flex items-center gap-3">
+      <AlertTriangle size={18} className="text-red-700" />
+      <div>
+        <p className="font-bold text-red-900 text-sm">{rows.length} ledger{rows.length === 1 ? '' : 's'} failed reconciliation</p>
+        <p className="text-[11px] text-red-700">Opening + (Cr − Dr) does not equal master closing balance — investigate before signing off the TB.</p>
+      </div>
+    </summary>
+    <div className="overflow-x-auto bg-white border-t border-red-200">
+      <table className="w-full text-xs">
+        <thead className="bg-red-50 text-red-700 font-bold text-[10px] uppercase">
+          <tr>
+            <th className="px-3 py-2 text-left">Ledger</th>
+            <th className="px-3 py-2 text-left">Group</th>
+            <th className="px-3 py-2 text-right">Opening (signed)</th>
+            <th className="px-3 py-2 text-right">During Net</th>
+            <th className="px-3 py-2 text-right">Calc Closing</th>
+            <th className="px-3 py-2 text-right">Master Closing</th>
+            <th className="px-3 py-2 text-right">Delta</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-red-100">
+          {rows.map((r) => (
+            <tr key={r.ledger}>
+              <td className="px-3 py-2 font-medium">{r.ledger}</td>
+              <td className="px-3 py-2 text-slate-600">{r.group}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{r.openingSigned.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{r.duringNet.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{r.closingCalculated.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{r.closingSigned.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+              <td className="px-3 py-2 text-right tabular-nums font-bold text-red-700">
+                {r.reconDelta >= 0 ? '+' : ''}{r.reconDelta.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </details>
+);
 
 export default TrialBalanceAnalysis;
