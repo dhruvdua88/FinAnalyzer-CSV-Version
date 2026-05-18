@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useTallyStore } from '../../services/tally';
 import { LedgerEntry, PartyMatrixProfile } from '../../types';
 import {
   Download,
@@ -402,6 +403,30 @@ const Kpi: React.FC<{ label: string; value: string | number; tone?: 'default' | 
 };
 
 const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUpdate }) => {
+  const store = useTallyStore();
+  // Per-party master attributes from mst_ledger (when the ZIP store is
+  // loaded). Surfaced as a metadata strip under each party name so the
+  // auditor sees real GSTIN / PAN / state / GST registration type — fields
+  // that drive in-state vs inter-state tax decisions and Sec 194Q PAN
+  // verification. Lookup is case-insensitive on ledger name to survive
+  // whitespace and case drift between transaction rows and master rows.
+  const partyMasterByName = useMemo(() => {
+    const map = new Map<string, { gstin: string; pan: string; state: string; gstRegType: string; mobile: string; email: string }>();
+    if (!store) return map;
+    for (const l of store.ledgers.values()) {
+      const key = l.name.trim().toLowerCase();
+      if (!key) continue;
+      map.set(key, {
+        gstin: (l.gstn || '').trim(),
+        pan: (l.it_pan || '').trim(),
+        state: (l.mailing_state || '').trim(),
+        gstRegType: (l.gst_registration_type || '').trim(),
+        mobile: (l.mobile || '').trim(),
+        email: (l.email || '').trim(),
+      });
+    }
+    return map;
+  }, [store]);
   const [partyQ, setPartyQ] = useState('');
   const [msg, setMsg] = useState('');
   const profileFileRef = useRef<HTMLInputElement | null>(null);
@@ -2230,6 +2255,28 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
                           </span>
                         )}
                       </div>
+                      {/* Master attributes strip from mst_ledger — hidden in
+                          compact density to keep table height tight. */}
+                      {(() => {
+                        const meta = partyMasterByName.get(r.partyName.trim().toLowerCase());
+                        if (!meta || density === 'compact') return null;
+                        const bits: React.ReactNode[] = [];
+                        if (meta.gstin)
+                          bits.push(<span key="g" className="font-mono">GSTIN {meta.gstin}</span>);
+                        if (meta.pan)
+                          bits.push(<span key="p" className="font-mono">PAN {meta.pan}</span>);
+                        if (meta.state)
+                          bits.push(<span key="s">{meta.state}</span>);
+                        if (meta.gstRegType)
+                          bits.push(<span key="rt" className="italic">{meta.gstRegType}</span>);
+                        if (bits.length === 0) return null;
+                        return (
+                          <div className="text-[10px] text-slate-500 mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 truncate"
+                               title={[meta.gstin, meta.pan, meta.state, meta.gstRegType, meta.mobile, meta.email].filter(Boolean).join(' · ')}>
+                            {bits.flatMap((b, i) => i === 0 ? [b] : [<span key={`sep-${i}`} className="text-slate-300">·</span>, b])}
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td
                       className={`px-3 ${rowPadY} border-b border-slate-100 overflow-hidden`}

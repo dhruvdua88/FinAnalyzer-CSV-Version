@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useTallyStore } from '../../services/tally';
 import { LedgerEntry } from '../../types';
 import { Download, Search, CheckSquare, ChevronDown, ChevronUp, Wallet } from 'lucide-react';
 import {
@@ -204,11 +205,61 @@ const normalizeClassifierText = (...parts: string[]) =>
 
 const includesAny = (text: string, keys: string[]) => keys.some((key) => text.includes(key));
 
+// Deterministic mapping from Tally's standard primary groups to AS-3 cash
+// flow activities. Used when a ZIP-imported store gives us the authoritative
+// primary; falls through to the text-heuristic matcher when the store hint
+// isn't conclusive. Keys are lowercased mst_group.primary_group values.
+const PRIMARY_GROUP_ACTIVITY: Record<string, CashFlowActivity> = {
+  // Working capital + revenue cycle → Operating
+  'sundry debtors':         'Operating',
+  'sundry creditors':       'Operating',
+  'sales accounts':         'Operating',
+  'purchase accounts':      'Operating',
+  'direct incomes':         'Operating',
+  'direct expenses':        'Operating',
+  'indirect incomes':       'Operating',
+  'indirect expenses':      'Operating',
+  'duties & taxes':         'Operating',
+  'provisions':             'Operating',
+  'current assets':         'Operating',  // (non-cash within current — bank/cash filtered out elsewhere)
+  'current liabilities':    'Operating',
+  'stock-in-hand':          'Operating',
+  'cash-in-hand':           'Operating',  // (the cash itself; routed differently when selected)
+  'bank accounts':          'Operating',
+  'bank od a/c':            'Operating',
+  // Long-term asset side → Investing
+  'fixed assets':           'Investing',
+  'investments':            'Investing',
+  // Capital structure → Financing
+  'capital account':        'Financing',
+  'reserves & surplus':     'Financing',
+  'loans (liability)':      'Financing',
+  'secured loans':          'Financing',
+  'unsecured loans':        'Financing',
+  // Suspense / misc — keep as operating (default-like behaviour)
+  'suspense a/c':           'Operating',
+  'misc. expenses (asset)': 'Operating',
+  'branch / divisions':     'Operating',
+  'loans & advances (asset)': 'Investing',
+  'deposits (asset)':       'Investing',
+};
+
 const classifyActivity = (ledger: string, primary: string, parent: string): CashFlowClassification => {
   const ledgerText = normalizeClassifierText(ledger);
   const primaryText = normalizeClassifierText(primary);
   const parentText = normalizeClassifierText(parent);
   const text = normalizeClassifierText(ledger, primary, parent);
+
+  // Store-driven primary match (mst_group.primary_group is authoritative)
+  const primaryLookup = primary.trim().toLowerCase();
+  const mapped = PRIMARY_GROUP_ACTIVITY[primaryLookup];
+  if (mapped) {
+    return {
+      activity: mapped,
+      rule: 'STORE_PRIMARY_MAP',
+      reason: `mst_group.primary_group = "${primary}" maps to ${mapped} per AS-3.`,
+    };
+  }
 
   // Rule priority is intentional: working-capital party ledgers should stay in Operating
   // even when the ledger name incidentally contains terms like "capital".
@@ -314,6 +365,27 @@ const classifyActivity = (ledger: string, primary: string, parent: string): Cash
 };
 
 const CashFlowAnalysis: React.FC<CashFlowAnalysisProps> = ({ data }) => {
+  const store = useTallyStore();
+  // Per-ledger bank attributes from mst_ledger. Surfaced inline alongside
+  // the cash-ledger selector so the auditor can sanity-check that the
+  // ledger they're treating as "cash" actually has a bank account on file
+  // (and which one).
+  const bankAttrsByLedger = useMemo(() => {
+    const map = new Map<string, { accountNumber: string; ifsc: string; bankName: string; branch: string; holder: string }>();
+    if (!store) return map;
+    for (const l of store.ledgers.values()) {
+      if (l.bank_account_number || l.bank_ifsc || l.bank_name) {
+        map.set(l.name, {
+          accountNumber: l.bank_account_number || '',
+          ifsc: l.bank_ifsc || '',
+          bankName: l.bank_name || '',
+          branch: l.bank_branch || '',
+          holder: l.bank_account_holder || '',
+        });
+      }
+    }
+    return map;
+  }, [store]);
   const [selectedCashLedgers, setSelectedCashLedgers] = useState<string[]>([]);
   const [isSelectionExpanded, setIsSelectionExpanded] = useState(true);
   const [cashLedgerSearch, setCashLedgerSearch] = useState('');
@@ -1093,6 +1165,7 @@ const CashFlowAnalysis: React.FC<CashFlowAnalysisProps> = ({ data }) => {
                 {filteredCashLedgers.map((ledger) => {
                   const isSelected = selectedCashLedgers.includes(ledger);
                   const meta = ledgerMetaMap.get(ledger);
+                  const bank = bankAttrsByLedger.get(ledger);
                   return (
                     <div
                       key={ledger}
@@ -1110,6 +1183,14 @@ const CashFlowAnalysis: React.FC<CashFlowAnalysisProps> = ({ data }) => {
                       <p className="text-[11px] text-slate-500 mt-1 truncate" title={`${meta?.primary || '-'} | ${meta?.parent || '-'}`}>
                         {meta?.primary || '-'} | {meta?.parent || '-'}
                       </p>
+                      {bank && (bank.accountNumber || bank.ifsc || bank.bankName) && (
+                        <p className="text-[10px] text-slate-500 mt-1 truncate font-mono"
+                           title={[bank.bankName, bank.branch, bank.accountNumber, bank.ifsc].filter(Boolean).join(' · ')}>
+                          {bank.bankName || 'Bank'}
+                          {bank.accountNumber && ` · A/C ${bank.accountNumber}`}
+                          {bank.ifsc && ` · ${bank.ifsc}`}
+                        </p>
+                      )}
                     </div>
                   );
                 })}

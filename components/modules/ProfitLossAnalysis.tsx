@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useTallyStore } from '../../services/tally';
 import {
   ChevronDown,
   ChevronRight,
@@ -218,7 +219,18 @@ const BS_HINT_WORDS = [
 
 const isStockOrInventoryGroup = (text: string) => text.includes('stock') || text.includes('inventory');
 
-const inferAutoHead = (bucket: PrimaryBucket): HeadId => {
+// Hint sourced from mst_group when a ZIP-imported store is available. When
+// provided, this takes precedence over the text-keyword heuristics below —
+// the flags are Tally's authoritative classification of a group as P&L vs
+// BS, direct vs indirect, income vs expense. Without it inferAutoHead
+// behaves exactly as before.
+interface StoreGroupHint {
+  isRevenue: boolean;            // mst_group.is_revenue (P&L group)
+  affectsGrossProfit: boolean;   // mst_group.affects_gross_profit (above-the-line)
+  isDeemedPositive: boolean;     // mst_group.is_deemedpositive (expense side)
+}
+
+const inferAutoHead = (bucket: PrimaryBucket, hint?: StoreGroupHint): HeadId => {
   const primary = bucket.primary.toLowerCase();
   const parentText = Array.from(bucket.parentSet).join(' ').toLowerCase();
   const combinedText = `${primary} ${parentText}`;
@@ -233,6 +245,23 @@ const inferAutoHead = (bucket: PrimaryBucket): HeadId => {
 
   if (bucket.hasStockOrInventoryWord) return 'EXCLUDED_BALANCE_SHEET';
   if (bucket.explicitBsCount > 0 && bucket.explicitPnlCount === 0) return 'EXCLUDED_BALANCE_SHEET';
+
+  // Store-driven classification (when hint present, mst_group flags are
+  // authoritative — Tally itself tells us whether the group sits in P&L
+  // or BS and which side of the gross-profit line it's on).
+  if (hint) {
+    if (!hint.isRevenue) return 'EXCLUDED_BALANCE_SHEET';
+    // is_revenue = true → P&L. Discriminate by sign + above-the-line flag.
+    if (hint.isDeemedPositive) {
+      // Expense side
+      if (hasPurchaseWord) return 'PURCHASES';
+      return hint.affectsGrossProfit ? 'DIRECT_EXPENSES' : 'INDIRECT_EXPENSES';
+    }
+    // Income side
+    if (hasSalesWord || hint.affectsGrossProfit) return 'REVENUE';
+    return 'OTHER_INCOME';
+  }
+
   if (hasSalesWord) return 'REVENUE';
   if (hasIncomeWord) return 'OTHER_INCOME';
   if (hasPurchaseWord) return 'PURCHASES';
@@ -294,6 +323,31 @@ const mapSqlBucketToPrimaryBucket = (bucket: SqlPnlPrimaryBucket): PrimaryBucket
 };
 
 const ProfitLossAnalysis: React.FC<{ data: LedgerEntry[] }> = ({ data }) => {
+  const store = useTallyStore();
+  // Pre-build a primary-group → mst_group flags lookup once per store load.
+  // Keyed by lowercased primary name so spelling/whitespace mismatches
+  // between the bucket name and mst_group.name don't drop the hint.
+  const storeHintByPrimary = useMemo(() => {
+    const map = new Map<string, StoreGroupHint>();
+    if (!store) return map;
+    for (const g of store.groups.values()) {
+      // mst_group.primary_group is the top-level Tally primary this group
+      // rolls up into; using it as the key means children inherit their
+      // primary's flags.
+      const primaryName = g.primary_group || g.name;
+      if (!primaryName || map.has(primaryName.toLowerCase())) continue;
+      // Look up the primary's own row when this row is a sub-group so we
+      // use the *primary's* flags (children may override; we want the head
+      // classification).
+      const primaryGroup = store.group(primaryName) || g;
+      map.set(primaryName.toLowerCase(), {
+        isRevenue: primaryGroup.is_revenue,
+        affectsGrossProfit: primaryGroup.affects_gross_profit,
+        isDeemedPositive: primaryGroup.is_deemedpositive,
+      });
+    }
+    return map;
+  }, [store]);
   const [groupSearch, setGroupSearch] = useState('');
   const [selectedMonths, setSelectedMonths] = useState<string[]>([]);
   const [openingStockSourceLedger, setOpeningStockSourceLedger] = useState('__AUTO__');
@@ -548,11 +602,11 @@ const ProfitLossAnalysis: React.FC<{ data: LedgerEntry[] }> = ({ data }) => {
 
     const buckets = Array.from(map.values()).map((bucket) => ({
       ...bucket,
-      autoHead: inferAutoHead(bucket),
+      autoHead: inferAutoHead(bucket, storeHintByPrimary.get(bucket.primary.toLowerCase())),
     }));
 
     return buckets.sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
-  }, [useSqlAnalytics, periodRows]);
+  }, [useSqlAnalytics, periodRows, storeHintByPrimary]);
 
   const primaryBuckets = useMemo(() => {
     return useSqlAnalytics ? sqlPrimaryBuckets : inMemoryPrimaryBuckets;
