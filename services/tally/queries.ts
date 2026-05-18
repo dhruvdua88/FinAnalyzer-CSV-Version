@@ -386,3 +386,311 @@ export const dateRangeOf = (rows: { date: string }[]): { dateFrom: string; dateT
   return { dateFrom, dateTo };
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Trial Balance — store-driven
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// One walk over mst_group, mst_ledger and trn_accounting builds:
+//   • A full recursive group tree (Sections 1+2)
+//   • Per-ledger reconciliation: opening + during net vs master closing (Section 3)
+//   • Activity classification: dormant / active / new / closed (Section 4)
+//   • Aggregated Dr/Cr totals at every node + grand totals + balance check
+//
+// Sign convention
+// ----------------
+// trn_accounting.amount keeps Tally's convention — *negative* means Dr,
+// *positive* means Cr. mst_ledger.opening_balance / .closing_balance keep
+// the same convention. We surface both signed and Dr/Cr-split views.
+
+export type TbActivity = 'dormant' | 'active' | 'new' | 'closed' | 'never-used';
+
+export interface TbDrCr {
+  openingDr: number;
+  openingCr: number;
+  duringDr: number;
+  duringCr: number;
+  closingDr: number;
+  closingCr: number;
+}
+
+export interface TbLedgerRow extends TbDrCr {
+  ledger: string;
+  group: string;                 // immediate parent group
+  primaryGroup: string;          // top-level walked primary
+  openingSigned: number;         // raw signed balance (Tally convention)
+  duringNet: number;             // duringCr - duringDr
+  closingSigned: number;
+  closingCalculated: number;     // opening + duringNet
+  reconDelta: number;            // closingCalculated - closingSigned (master)
+  reconPass: boolean;
+  activity: TbActivity;
+  pan: string;
+  gstin: string;
+  mailingState: string;
+  isRevenue: boolean;
+  isReserved: boolean;
+}
+
+export interface TbGroupNode extends TbDrCr {
+  name: string;                  // group name
+  parent: string;                // group's parent (empty for primary)
+  primaryGroup: string;
+  level: number;                 // depth from root (0 = primary)
+  isPrimary: boolean;
+  isRevenue: boolean;
+  isReserved: boolean;
+  sortPosition: number;
+  childGroups: TbGroupNode[];
+  childLedgers: TbLedgerRow[];
+  ledgerCount: number;           // including all descendant groups
+}
+
+export interface TbBalanceCheck {
+  // Each pair must equal within `tolerance`. `delta` is signed
+  // (positive = excess Dr, negative = excess Cr).
+  opening: { dr: number; cr: number; delta: number; ok: boolean };
+  during:  { dr: number; cr: number; delta: number; ok: boolean };
+  closing: { dr: number; cr: number; delta: number; ok: boolean };
+  tolerance: number;
+}
+
+export interface TbActivityCounts {
+  dormant: number;
+  active: number;
+  new: number;
+  closed: number;
+  'never-used': number;
+}
+
+export interface TrialBalanceResult {
+  tree: TbGroupNode[];                  // top-level (primary) group nodes
+  flatLedgers: TbLedgerRow[];           // every ledger row, for table / search views
+  reconciliationFailures: TbLedgerRow[]; // ledgers whose recon failed
+  activityCounts: TbActivityCounts;
+  balanceCheck: TbBalanceCheck;
+  grandTotals: TbDrCr;
+  periodFrom: string;                   // ISO, earliest voucher date
+  periodTo: string;                     // ISO, latest voucher date
+}
+
+export interface TbOpts {
+  // ISO date range; lines outside this window aren't counted in `during`
+  // and don't affect the calculated closing. Default: all dates.
+  dateFrom?: string;
+  dateTo?: string;
+  // Tolerance for "PASS" status — both the balance equation and per-ledger
+  // reconciliation use this. Default: ₹0.50.
+  tolerance?: number;
+}
+
+const splitSigned = (signed: number): { dr: number; cr: number } => ({
+  dr: signed < 0 ? -signed : 0,
+  cr: signed > 0 ? signed : 0,
+});
+
+const zeroDrCr = (): TbDrCr => ({
+  openingDr: 0, openingCr: 0, duringDr: 0, duringCr: 0, closingDr: 0, closingCr: 0,
+});
+
+const addDrCr = (target: TbDrCr, source: TbDrCr): void => {
+  target.openingDr += source.openingDr;
+  target.openingCr += source.openingCr;
+  target.duringDr  += source.duringDr;
+  target.duringCr  += source.duringCr;
+  target.closingDr += source.closingDr;
+  target.closingCr += source.closingCr;
+};
+
+const classifyActivity = (
+  opening: number,
+  duringDr: number,
+  duringCr: number,
+  closing: number,
+  tolerance: number,
+): TbActivity => {
+  const hasOpening = Math.abs(opening) > tolerance;
+  const hasMovement = duringDr > tolerance || duringCr > tolerance;
+  const hasClosing = Math.abs(closing) > tolerance;
+  if (!hasOpening && !hasMovement && !hasClosing) return 'never-used';
+  if (!hasOpening && hasMovement) return 'new';
+  if (hasOpening && !hasMovement && hasClosing) return 'dormant';
+  if (hasOpening && hasMovement && !hasClosing) return 'closed';
+  return 'active';
+};
+
+export const getTrialBalance = (
+  store: TallyStore,
+  opts: TbOpts = {},
+): TrialBalanceResult => {
+  const tolerance = opts.tolerance ?? 0.5;
+  const { dateFrom, dateTo } = opts;
+
+  // ── Pass 1: aggregate transactional movement per ledger ──────────────────
+  // Only accounting-voucher lines; date filter applied per voucher.
+  const accByLedger = new Map<string, { dr: number; cr: number }>();
+  let periodFrom = '';
+  let periodTo = '';
+
+  for (const line of store.accountingLines) {
+    const v = store.voucher(line.guid);
+    if (!v || !v.is_accounting_voucher) continue;
+    if (dateFrom && v.date && v.date < dateFrom) continue;
+    if (dateTo && v.date && v.date > dateTo) continue;
+
+    const key = nameKey(line.ledger);
+    let entry = accByLedger.get(key);
+    if (!entry) { entry = { dr: 0, cr: 0 }; accByLedger.set(key, entry); }
+    if (line.amount < 0) entry.dr += -line.amount;
+    else if (line.amount > 0) entry.cr += line.amount;
+
+    if (v.date) {
+      if (!periodFrom || v.date < periodFrom) periodFrom = v.date;
+      if (!periodTo || v.date > periodTo) periodTo = v.date;
+    }
+  }
+
+  // ── Pass 2: build per-ledger TB rows ─────────────────────────────────────
+  const flatLedgers: TbLedgerRow[] = [];
+  for (const ledger of store.ledgers.values()) {
+    const groupName = ledger.parent || '';
+    const primary = store.primaryGroupFor(ledger.name);
+    const movement = accByLedger.get(nameKey(ledger.name)) || { dr: 0, cr: 0 };
+
+    const openingSigned = ledger.opening_balance || 0;
+    const closingSigned = ledger.closing_balance || 0;
+    const opening = splitSigned(openingSigned);
+    const closing = splitSigned(closingSigned);
+    const duringNet = movement.cr - movement.dr;
+    const closingCalculated = openingSigned + duringNet;
+    const reconDelta = closingCalculated - closingSigned;
+
+    flatLedgers.push({
+      ledger: ledger.name,
+      group: groupName,
+      primaryGroup: primary,
+      openingDr: opening.dr, openingCr: opening.cr,
+      duringDr: movement.dr, duringCr: movement.cr,
+      closingDr: closing.dr, closingCr: closing.cr,
+      openingSigned,
+      duringNet,
+      closingSigned,
+      closingCalculated,
+      reconDelta,
+      reconPass: Math.abs(reconDelta) <= tolerance,
+      activity: classifyActivity(openingSigned, movement.dr, movement.cr, closingSigned, tolerance),
+      pan: ledger.it_pan || '',
+      gstin: ledger.gstn || '',
+      mailingState: ledger.mailing_state || '',
+      isRevenue: ledger.is_revenue,
+      isReserved: false,            // ledgers don't carry is_reserved; groups do
+    });
+  }
+
+  // ── Pass 3: build group tree ──────────────────────────────────────────────
+  // mst_group.parent forms a forest. Build child-by-parent index, walk
+  // recursively. sort_position drives sibling ordering so output matches
+  // Tally's Group of Groups view.
+  const childGroupsByParent = new Map<string, string[]>();
+  const rootNames: string[] = [];
+  for (const g of store.groups.values()) {
+    if (!g.parent) rootNames.push(g.name);
+    else {
+      const list = childGroupsByParent.get(nameKey(g.parent));
+      if (list) list.push(g.name); else childGroupsByParent.set(nameKey(g.parent), [g.name]);
+    }
+  }
+
+  const ledgersByGroup = new Map<string, TbLedgerRow[]>();
+  for (const r of flatLedgers) {
+    const k = nameKey(r.group);
+    const list = ledgersByGroup.get(k);
+    if (list) list.push(r); else ledgersByGroup.set(k, [r]);
+  }
+
+  const sortGroupsBy = (names: string[]): string[] =>
+    names.slice().sort((a, b) => {
+      const ga = store.group(a);
+      const gb = store.group(b);
+      const sa = ga?.sort_position ?? 9999;
+      const sb = gb?.sort_position ?? 9999;
+      if (sa !== sb) return sa - sb;
+      return a.localeCompare(b);
+    });
+
+  const buildNode = (groupName: string, level: number, isPrimary: boolean): TbGroupNode => {
+    const g = store.group(groupName);
+    const node: TbGroupNode = {
+      name: groupName,
+      parent: g?.parent || '',
+      primaryGroup: g?.primary_group || (isPrimary ? groupName : ''),
+      level,
+      isPrimary,
+      isRevenue: g?.is_revenue ?? false,
+      isReserved: g?.is_reserved ?? false,
+      sortPosition: g?.sort_position ?? 9999,
+      childGroups: [],
+      childLedgers: (ledgersByGroup.get(nameKey(groupName)) || []).slice().sort((a, b) => a.ledger.localeCompare(b.ledger)),
+      ledgerCount: 0,
+      ...zeroDrCr(),
+    };
+
+    const childNames = sortGroupsBy(childGroupsByParent.get(nameKey(groupName)) || []);
+    for (const childName of childNames) {
+      node.childGroups.push(buildNode(childName, level + 1, false));
+    }
+
+    // Roll up Dr/Cr totals from ledger leaves + sub-group nodes
+    for (const lr of node.childLedgers) addDrCr(node, lr);
+    for (const sub of node.childGroups) addDrCr(node, sub);
+
+    node.ledgerCount = node.childLedgers.length + node.childGroups.reduce((s, sg) => s + sg.ledgerCount, 0);
+    return node;
+  };
+
+  const tree: TbGroupNode[] = sortGroupsBy(rootNames).map((name) => buildNode(name, 0, true));
+
+  // ── Grand totals + balance check ─────────────────────────────────────────
+  const grandTotals = zeroDrCr();
+  for (const lr of flatLedgers) addDrCr(grandTotals, lr);
+
+  const balanceCheck: TbBalanceCheck = {
+    opening: {
+      dr: grandTotals.openingDr,
+      cr: grandTotals.openingCr,
+      delta: grandTotals.openingDr - grandTotals.openingCr,
+      ok: Math.abs(grandTotals.openingDr - grandTotals.openingCr) <= tolerance,
+    },
+    during: {
+      dr: grandTotals.duringDr,
+      cr: grandTotals.duringCr,
+      delta: grandTotals.duringDr - grandTotals.duringCr,
+      ok: Math.abs(grandTotals.duringDr - grandTotals.duringCr) <= tolerance,
+    },
+    closing: {
+      dr: grandTotals.closingDr,
+      cr: grandTotals.closingCr,
+      delta: grandTotals.closingDr - grandTotals.closingCr,
+      ok: Math.abs(grandTotals.closingDr - grandTotals.closingCr) <= tolerance,
+    },
+    tolerance,
+  };
+
+  const activityCounts: TbActivityCounts = {
+    dormant: 0, active: 0, new: 0, closed: 0, 'never-used': 0,
+  };
+  for (const r of flatLedgers) activityCounts[r.activity] += 1;
+
+  const reconciliationFailures = flatLedgers.filter((r) => !r.reconPass);
+
+  return {
+    tree,
+    flatLedgers,
+    reconciliationFailures,
+    activityCounts,
+    balanceCheck,
+    grandTotals,
+    periodFrom,
+    periodTo,
+  };
+};
+
