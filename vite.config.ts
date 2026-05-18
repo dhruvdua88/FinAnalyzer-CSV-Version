@@ -2141,7 +2141,13 @@ const runLoaderWithOverrides = async (body: any): Promise<{
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
+    // When deploying the static build to GitHub Pages, assets must resolve
+    // under the repo-name subpath (https://<user>.github.io/<repo>/). The
+    // deploy-pages workflow sets DEPLOY_TARGET=gh-pages so production builds
+    // for Tauri / SEA / dev all continue to serve from "/" unchanged.
+    const isGhPagesBuild = process.env.DEPLOY_TARGET === 'gh-pages';
     return {
+      base: isGhPagesBuild ? '/finanalyzer/' : '/',
       server: {
         port: 3000,
         host: '0.0.0.0',

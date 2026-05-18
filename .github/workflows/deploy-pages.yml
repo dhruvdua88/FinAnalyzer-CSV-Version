@@ -1,0 +1,76 @@
+# Build the Vite app and publish it to GitHub Pages.
+#
+# Pages will be reachable at  https://<owner>.github.io/<repo>/  once the
+# repo's Pages source is set to "GitHub Actions" in Settings → Pages.
+# The first run will fail with a "Get Pages site failed" error until
+# that switch is flipped — that's expected, just re-run after enabling.
+#
+# DEPLOY_TARGET=gh-pages is read by vite.config.ts to set base: '/finanalyzer/'
+# so asset URLs resolve under the subpath. Local dev and Tauri builds are
+# unaffected (they don't set the var).
+
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - feature/tally-xlsx-import
+      - main
+  workflow_dispatch:        # lets you trigger a deploy manually from the Actions tab
+
+# Only one Pages deployment can run at a time; cancel the older one if a
+# newer push comes in.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build for GitHub Pages
+        env:
+          DEPLOY_TARGET: gh-pages
+        run: npm run build
+
+      - name: Add SPA fallback
+        # GitHub Pages serves a 404.html for unmatched routes. Cloning
+        # dist/index.html → dist/404.html lets the React app handle deep
+        # links if any get used (mostly a no-op for this single-page app
+        # but cheap insurance).
+        run: cp dist/index.html dist/404.html
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
