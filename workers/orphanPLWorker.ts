@@ -19,6 +19,7 @@
  */
 
 import type { LedgerEntry } from '../types';
+import { voucherFamilyKey } from '../services/tally/helpers';
 
 // ── Buckets ───────────────────────────────────────────────────────────────────
 export type PLBucket =
@@ -194,10 +195,12 @@ const ledgerOf = (row: LedgerEntry): string =>
 function computeOrphanVouchers(input: OrphanPLWorkerInput): OrphanPLWorkerOutput {
   const { rows, filters } = input;
 
-  // Group rows by voucher guid
+  // Group rows by voucher (family) key — legs of one voucher share a base guid
+  // with a per-leg `-<n>` suffix, so we must strip it; grouping by the raw guid
+  // would put every leg in its own group and flag all P&L rows as orphans.
   const voucherMap = new Map<string, LedgerEntry[]>();
   rows.forEach((r) => {
-    const g = String(r.guid ?? '');
+    const g = voucherFamilyKey(r.guid);
     if (!g) return;
     if (!voucherMap.has(g)) voucherMap.set(g, []);
     voucherMap.get(g)!.push(r);

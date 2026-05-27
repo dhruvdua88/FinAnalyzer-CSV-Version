@@ -8,6 +8,7 @@ export * from './queries';
 export { TallyStoreProvider, useTallyStore } from './StoreContext';
 export {
   toText, toNumber, toBool, toIsoDate, nameKey,
+  voucherFamilyKey, voucherKey, isPlPrimaryGroup, buildLedgerPrimaryMap,
 } from './helpers';
 
 import { TallyStore } from './store';

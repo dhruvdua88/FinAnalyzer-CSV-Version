@@ -64,3 +64,52 @@ export const lowercaseKeys = (row: Record<string, any>): Record<string, any> => 
   for (const k of Object.keys(row || {})) out[k.trim().toLowerCase()] = row[k];
   return out;
 };
+
+// ── Voucher identity ─────────────────────────────────────────────────────────
+// getLedgerEntries() mints one row per accounting leg with a row-unique id of
+// the form `<voucherGuid>-<txIndex>`. To regroup a voucher's legs, strip the
+// single trailing `-<n>`. This is the ONE place that encodes that format — every
+// module (workers + views) must use it rather than re-implementing the regex,
+// since a divergence here silently shatters vouchers into single-line groups.
+export const voucherFamilyKey = (guid: any): string => {
+  const v = toText(guid);
+  if (!v) return '';
+  if (!/-\d+$/.test(v)) return v;
+  return v.replace(/-\d+$/, '');
+};
+
+// Single-string voucher key for a flat LedgerEntry-shaped row: prefer the guid
+// family; fall back to date|type|number when the guid is absent or synthetic
+// (master-ledger rows carry a `ledger-master-…` guid that must not be stripped).
+export const voucherKey = (e: {
+  guid?: any;
+  date?: any;
+  voucher_type?: any;
+  voucher_number?: any;
+}): string => {
+  const g = String(e?.guid || '');
+  if (g && !g.startsWith('ledger-master-')) return voucherFamilyKey(g);
+  return `${toText(e?.date)}|${toText(e?.voucher_type)}|${toText(e?.voucher_number)}`;
+};
+
+// ── Ledger classification ──────────────────────────────────────────────────────
+// True when a ledger's Tally primary group is a P&L head (sales / income /
+// purchase / expense). A genuine TDS/GST/RCM tax ledger never lives under a P&L
+// head, so tax-ledger auto-suggest uses this to reject income/expense ledgers
+// that merely mention a tax in their NAME (e.g. "Service Charges Collected
+// (IGST)" under Sales Accounts), which would otherwise swallow real revenue.
+export const isPlPrimaryGroup = (primary: any): boolean =>
+  /(sale|income|purchase|inward|expense)/i.test(toText(primary));
+
+// First-seen ledger-name → Tally primary-group map, for the auto-suggest guard.
+export const buildLedgerPrimaryMap = (
+  rows: Array<{ Ledger?: any; TallyPrimary?: any }>,
+): Map<string, string> => {
+  const m = new Map<string, string>();
+  for (const r of rows) {
+    const l = toText(r?.Ledger);
+    const p = toText(r?.TallyPrimary);
+    if (l && p && !m.has(l)) m.set(l, p);
+  }
+  return m;
+};

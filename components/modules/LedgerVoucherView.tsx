@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { LedgerEntry } from '../../types';
 import { ChevronDown, ChevronRight, Download, Search } from 'lucide-react';
 import { fetchSqlLedgerList, fetchSqlLedgerVoucherPage } from '../../services/sqlAnalyticsService';
+import { voucherFamilyKey } from '../../services/tally';
 
 interface LedgerVoucherViewProps {
   data: LedgerEntry[];
@@ -99,18 +100,11 @@ const getDrCr = (amount: number) => {
 
 const isSyntheticUnknownVoucher = (voucherNumber: string) => /^unknown(?:-\d+)?$/i.test(String(voucherNumber || '').trim());
 
-const getGuidFamilyKey = (guid: string) => {
-  const value = String(guid || '').trim();
-  if (!value) return '';
-  if (!/-\d+$/.test(value)) return value;
-  return value.replace(/-\d+$/, '');
-};
-
 const getVoucherGroupIdentity = (entry: LedgerEntry) => {
   const voucherNumber = String(entry.voucher_number || entry.invoice_number || 'UNKNOWN').trim() || 'UNKNOWN';
   const date = String(entry.date || '').trim();
   const voucherType = String(entry.voucher_type || '').trim();
-  const guidFamily = getGuidFamilyKey(String(entry.guid || ''));
+  const guidFamily = voucherFamilyKey(entry.guid);
   const voucherFamily = isSyntheticUnknownVoucher(voucherNumber) && guidFamily ? `UNKNOWN_GUID::${guidFamily}` : voucherNumber;
   return {
     voucherNumber,

@@ -10,6 +10,7 @@
  */
 
 import type { LedgerEntry } from '../types';
+import { voucherKey } from '../services/tally/helpers';
 
 // ── Types shared with the host component ─────────────────────────────────────
 
@@ -96,12 +97,6 @@ const toNum = (v: any): number => {
 };
 
 const norm = (v: any) => String(v || '').trim().toLowerCase();
-
-const voucherKey = (e: LedgerEntry): string => {
-  const g = String(e.guid || '');
-  if (g && !g.startsWith('ledger-master-')) return g.replace(/-\d+$/, '');
-  return `${e.date}|${e.voucher_type}|${e.voucher_number}`;
-};
 
 const classifyPrimary = (e: LedgerEntry): Bucket | null => {
   const t = norm(e.TallyPrimary);

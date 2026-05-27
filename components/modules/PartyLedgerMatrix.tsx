@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useTallyStore } from '../../services/tally';
+import { useTallyStore, isPlPrimaryGroup } from '../../services/tally';
 import { LedgerEntry, PartyMatrixProfile } from '../../types';
 import {
   Download,
@@ -535,8 +535,7 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
   // sales/income/purchase/expense; otherwise an income ledger that merely
   // mentions a tax in its name (e.g. "Service Charges Collected (IGST)") gets
   // mis-suggested as GST and swallows real sales into the GST bucket.
-  const isPlPrimary = (ledger: string) =>
-    /(sale|income|purchase|inward|expense)/i.test(ledgerPrimary.get(ledger) || '');
+  const isPlPrimary = (ledger: string) => isPlPrimaryGroup(ledgerPrimary.get(ledger));
   const suggestedTds = useMemo(
     () => allLedgers.filter((x) => /(tds|194)/i.test(x) && !isPlPrimary(x)),
     [allLedgers, ledgerPrimary],

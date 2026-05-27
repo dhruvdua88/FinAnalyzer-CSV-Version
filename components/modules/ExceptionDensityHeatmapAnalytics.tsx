@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { AlertTriangle, Download, Filter, Search, ShieldAlert } from 'lucide-react';
 import { LedgerEntry } from '../../types';
-import { useTallyStore } from '../../services/tally';
+import { useTallyStore, voucherFamilyKey } from '../../services/tally';
 
 type Severity = 'High' | 'Medium' | 'Low';
 
@@ -165,18 +165,11 @@ const monthSortValue = (monthKey: string) => {
 
 const isSyntheticUnknownVoucher = (voucherNumber: string) => /^unknown(?:-\d+)?$/i.test(String(voucherNumber || '').trim());
 
-const getGuidFamilyKey = (guid: string) => {
-  const value = String(guid || '').trim();
-  if (!value) return '';
-  if (!/-\d+$/.test(value)) return value;
-  return value.replace(/-\d+$/, '');
-};
-
 const getVoucherIdentity = (entry: LedgerEntry) => {
   const voucherNumber = String(entry.voucher_number || entry.invoice_number || 'UNKNOWN').trim() || 'UNKNOWN';
   const date = String(entry.date || '').trim();
   const voucherType = String(entry.voucher_type || '').trim() || 'Unknown Type';
-  const guidFamily = getGuidFamilyKey(String(entry.guid || ''));
+  const guidFamily = voucherFamilyKey(entry.guid);
   const voucherFamily = isSyntheticUnknownVoucher(voucherNumber) && guidFamily ? `UNKNOWN_GUID::${guidFamily}` : voucherNumber;
   return {
     voucherNumber,

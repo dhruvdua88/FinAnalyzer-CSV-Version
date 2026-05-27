@@ -41,7 +41,7 @@ import {
 import type { LedgerEntry, TDSThresholdConfig, TDSSectionMapping, AuditAnnotation } from '../../types';
 import { TDS_SECTION_DEFAULTS } from '../../types';
 import { getUniqueLedgers } from '../../services/dataService';
-import { useTallyStore } from '../../services/tally';
+import { useTallyStore, buildLedgerPrimaryMap, isPlPrimaryGroup } from '../../services/tally';
 import type {
   TdsRawRow,
   TDSVoucherDetail,
@@ -416,6 +416,7 @@ const TDSAnalysis: React.FC<TDSAnalysisProps> = ({
 
   // ── All ledger list ───────────────────────────────────────────────────────
   const allLedgers = useMemo(() => getUniqueLedgers(data), [data]);
+  const ledgerPrimary = useMemo(() => buildLedgerPrimaryMap(data), [data]);
 
   // ── Section mapping helpers ───────────────────────────────────────────────
   const getLedgerSection = (ledger: string): string => {
@@ -542,7 +543,8 @@ const TDSAnalysis: React.FC<TDSAnalysisProps> = ({
                     setSelectedTaxLedgers(
                       allLedgers.filter((l) => {
                         const v = l.toLowerCase();
-                        return v.includes('tds') && !v.includes('nontds') && !v.includes('non tds');
+                        return v.includes('tds') && !v.includes('nontds') && !v.includes('non tds')
+                          && !isPlPrimaryGroup(ledgerPrimary.get(l));
                       }),
                     )
                   }

@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { LedgerEntry } from '../../types';
 import { groupVouchers, getUniqueLedgers, exportToExcel } from '../../services/dataService';
-import { useTallyStore } from '../../services/tally';
+import { useTallyStore, buildLedgerPrimaryMap, isPlPrimaryGroup } from '../../services/tally';
 import { Search, Filter, AlertTriangle, CheckCircle2, Download, ChevronDown, ChevronUp, X, CheckSquare, Square, Calculator, Layers, Users, Info, Percent, SlidersHorizontal, ClipboardList } from 'lucide-react';
 
 interface RCMAnalysisProps {
@@ -88,6 +88,7 @@ const RCMAnalysis: React.FC<RCMAnalysisProps> = ({ data, externalSelectedLedgers
   const [rateFilter, setRateFilter] = useState<string>('all');
 
   const allLedgers = useMemo(() => getUniqueLedgers(data), [data]);
+  const ledgerPrimary = useMemo(() => buildLedgerPrimaryMap(data), [data]);
 
   const analysisGroups = useMemo(() => {
     if (selectedTaxLedgers.length === 0) return [];
@@ -177,7 +178,7 @@ const RCMAnalysis: React.FC<RCMAnalysisProps> = ({ data, externalSelectedLedgers
           <div className="p-6">
             <div className="flex flex-col md:flex-row gap-4 mb-4">
               <div className="relative flex-1"><Search className="absolute left-3 top-2.5 text-slate-400" size={18} /><input type="text" placeholder="Search RCM tax ledgers..." className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500" value={taxLedgerSearch} onChange={(e) => setTaxLedgerSearch(e.target.value)} /></div>
-              <div className="flex gap-2"><button onClick={() => setSelectedTaxLedgers(allLedgers.filter(l => l.toLowerCase().includes('rcm')))} className="px-4 py-2 bg-purple-50 text-purple-700 rounded-lg text-sm font-medium hover:bg-purple-100 border border-purple-200">Auto-Select 'RCM'</button><button onClick={() => setSelectedTaxLedgers([])} className="px-4 py-2 bg-slate-50 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-100 border border-slate-200">Clear</button></div>
+              <div className="flex gap-2"><button onClick={() => setSelectedTaxLedgers(allLedgers.filter(l => l.toLowerCase().includes('rcm') && !isPlPrimaryGroup(ledgerPrimary.get(l))))} className="px-4 py-2 bg-purple-50 text-purple-700 rounded-lg text-sm font-medium hover:bg-purple-100 border border-purple-200">Auto-Select 'RCM'</button><button onClick={() => setSelectedTaxLedgers([])} className="px-4 py-2 bg-slate-50 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-100 border border-slate-200">Clear</button></div>
             </div>
             <div className="max-h-[150px] overflow-y-auto border border-slate-200 rounded-lg bg-slate-50 p-2"><div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">{allLedgers.filter(l => !taxLedgerSearch || l.toLowerCase().includes(taxLedgerSearch.toLowerCase())).map(ledger => { const isSelected = selectedTaxLedgers.includes(ledger); return (<div key={ledger} onClick={() => setSelectedTaxLedgers(prev => isSelected ? prev.filter(l => l !== ledger) : [...prev, ledger])} className={`flex items-center gap-3 p-2 rounded-md cursor-pointer border transition-all ${isSelected ? 'bg-purple-50 border-purple-300' : 'bg-white border-slate-200'}`}><div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${isSelected ? 'bg-purple-600 border-purple-600' : 'bg-white border-slate-300'}`}>{isSelected && <CheckSquare size={12} className="text-white" />}</div><span className="text-sm truncate">{ledger}</span></div>);})}</div></div>
           </div>

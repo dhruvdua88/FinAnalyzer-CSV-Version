@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { LedgerEntry } from '../../types';
 import { groupVouchers, getUniqueLedgers, exportToExcel } from '../../services/dataService';
+import { buildLedgerPrimaryMap, isPlPrimaryGroup } from '../../services/tally';
 import { Search, Filter, PieChart, Download, ChevronUp, ChevronDown, CheckSquare, Square, X, CheckCircle2, List, FileText } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend } from 'recharts';
 
@@ -55,6 +56,7 @@ const GSTLedgerSummary: React.FC<GSTLedgerSummaryProps> = ({ data, externalSelec
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
 
   const allLedgers = useMemo(() => getUniqueLedgers(data), [data]);
+  const ledgerPrimary = useMemo(() => buildLedgerPrimaryMap(data), [data]);
 
   const filteredLedgersToSelect = useMemo(() => {
     if (!ledgerSearchTerm) return allLedgers;
@@ -251,7 +253,7 @@ const GSTLedgerSummary: React.FC<GSTLedgerSummaryProps> = ({ data, externalSelec
                 />
               </div>
               <div className="flex gap-2 shrink-0">
-                <button onClick={() => setSelectedLedgers(allLedgers.filter(l => l.toLowerCase().includes('gst')))} className="px-3 py-2 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100 border border-blue-200">
+                <button onClick={() => setSelectedLedgers(allLedgers.filter(l => l.toLowerCase().includes('gst') && !isPlPrimaryGroup(ledgerPrimary.get(l))))} className="px-3 py-2 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100 border border-blue-200">
                    Auto-Select 'GST'
                 </button>
                 <button onClick={selectAllFiltered} className="px-3 py-2 bg-slate-50 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-100 border border-slate-200 flex items-center gap-2">
