@@ -2,23 +2,28 @@
 # macOS. Each runner builds on its own OS because a SEA embeds that platform's
 # Node runtime and the native better-sqlite3 addon — they can't be cross-built.
 #
-# Trigger it from the Actions tab (Run workflow), or push a tag like v1.0.0 to
-# also publish the binaries to a GitHub Release.
+# Triggers:
+#   • push to the active dev branch — builds + publishes a rolling release
+#     (tag v1.0.0-desktop) so there's always a fresh download link.
+#   • push a tag like v1.0.0 — publishes a release at that tag.
+#   • manual run from the Actions tab.
 #
 # Output per target = a folder you send to end users:
-#   FinAnalyzer.exe (or FinAnalyzer) + app/ (dist + backend + runtime deps)
-# Download it from the run's "Artifacts" section, or from the Release on a tag.
+#   FinAnalyzer.exe (or FinAnalyzer) + app/ (dist + backend + runtime deps).
+# Download it from the GitHub Release, or the run's "Artifacts" section.
 
 name: Build Desktop App
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - claude/quirky-turing-G3Yak
     tags:
       - 'v*'
 
 permissions:
-  contents: write        # needed for the release job on tag pushes
+  contents: write        # the release job creates a tag + release via the token
 
 jobs:
   build:
@@ -68,7 +73,7 @@ jobs:
   release:
     name: Publish release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -77,10 +82,30 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create / update GitHub Release
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" artifacts/*.zip
-             --repo "${{ github.repository }}"
-             --title "${{ github.ref_name }}"
-             --generate-notes
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="v1.0.0-desktop"
+          fi
+          echo "Publishing release $TAG with assets:"
+          ls -la artifacts
+          # Recreate the rolling release so assets always match the latest build.
+          gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create "$TAG" artifacts/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "FinAnalyzer Desktop ($TAG)" \
+            --notes "Standalone desktop builds — no Node install required.
+
+          | Platform | Download |
+          |---|---|
+          | Windows 10/11 (x64) | FinAnalyzer-windows-x64.zip |
+          | macOS Apple Silicon | FinAnalyzer-macos-arm64.zip |
+          | macOS Intel | FinAnalyzer-macos-x64.zip |
+
+          Unzip the folder and run **FinAnalyzer.exe** (Windows) or **Run FinAnalyzer.command** (macOS). Keep the \`app/\` folder next to the executable. The app opens at http://127.0.0.1:5173."

@@ -7,6 +7,24 @@ FinAnalyzer was built by a practicing CA for practicing CAs. If you've ever spen
 
 ---
 
+## ⬇️ Download the ready-to-run app (no Node install needed)
+
+Grab a standalone build — unzip and double-click. **All downloads:** [github.com/dhruvdua88/finanalyzer/releases](https://github.com/dhruvdua88/finanalyzer/releases)
+
+| Platform | Download |
+|---|---|
+| **Windows 10/11** (x64) | [FinAnalyzer-windows-x64.zip](https://github.com/dhruvdua88/finanalyzer/releases/download/v1.0.0-desktop/FinAnalyzer-windows-x64.zip) |
+| **macOS** (Apple Silicon / M1–M4) | [FinAnalyzer-macos-arm64.zip](https://github.com/dhruvdua88/finanalyzer/releases/download/v1.0.0-desktop/FinAnalyzer-macos-arm64.zip) |
+| **macOS** (Intel) | [FinAnalyzer-macos-x64.zip](https://github.com/dhruvdua88/finanalyzer/releases/download/v1.0.0-desktop/FinAnalyzer-macos-x64.zip) |
+
+1. Unzip the folder anywhere.
+2. **Windows:** double-click `FinAnalyzer.exe`. **macOS:** double-click `Run FinAnalyzer.command` (first time: right-click → **Open** to get past Gatekeeper, since the build isn't notarized).
+3. Keep the `app/` folder next to the executable — it's required. The app opens at `http://127.0.0.1:5173`.
+
+> Prefer to run from source instead? See the [Quick Start](#quick-start-for-chartered-accountants-no-coding) below.
+
+---
+
 ## What it does (at a glance)
 
 | Area | Modules |
