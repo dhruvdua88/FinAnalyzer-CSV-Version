@@ -48,13 +48,20 @@ if (args.has('--help')) {
   printHelpAndExit();
 }
 
+// On Windows, npm/npx are .cmd shims; execFileSync won't find the bare name
+// (it does no PATHEXT resolution), so map them to their .cmd form there.
+const resolveBin = (command) =>
+  process.platform === 'win32' && (command === 'npm' || command === 'npx')
+    ? `${command}.cmd`
+    : command;
+
 const run = (command, commandArgs, cwd = ROOT_DIR) => {
   process.stdout.write(`\n> ${command} ${commandArgs.join(' ')}\n`);
-  execFileSync(command, commandArgs, { stdio: 'inherit', cwd });
+  execFileSync(resolveBin(command), commandArgs, { stdio: 'inherit', cwd });
 };
 
 const runCapture = (command, commandArgs, cwd = ROOT_DIR) =>
-  execFileSync(command, commandArgs, { cwd, encoding: 'utf8' });
+  execFileSync(resolveBin(command), commandArgs, { cwd, encoding: 'utf8' });
 
 const ensureDir = (dirPath) => fs.mkdirSync(dirPath, { recursive: true });
 

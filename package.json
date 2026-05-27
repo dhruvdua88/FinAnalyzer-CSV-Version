@@ -10,6 +10,8 @@
     "build": "cross-env NODE_OPTIONS=--no-deprecation vite build",
     "preview": "cross-env NODE_OPTIONS=--no-deprecation vite preview",
     "test:gstr2b": "node --test desktop-backend/tests/gstr2bReconciliation.test.cjs",
+    "package:exe": "node sea/build-sea.cjs",
+    "package:exe:stage": "node sea/build-sea.cjs --stage-only",
     "tauri:prepare": "node scripts/prepare-tauri-node.cjs",
     "tauri:dev": "cmd /c \"set NODE_OPTIONS=--no-deprecation&& set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri dev\"",
     "tauri:build": "cmd /c \"set NODE_OPTIONS=--no-deprecation&& set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri build\""

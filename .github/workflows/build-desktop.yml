@@ -1,0 +1,86 @@
+# Build standalone FinAnalyzer desktop binaries (Node SEA) for Windows and
+# macOS. Each runner builds on its own OS because a SEA embeds that platform's
+# Node runtime and the native better-sqlite3 addon — they can't be cross-built.
+#
+# Trigger it from the Actions tab (Run workflow), or push a tag like v1.0.0 to
+# also publish the binaries to a GitHub Release.
+#
+# Output per target = a folder you send to end users:
+#   FinAnalyzer.exe (or FinAnalyzer) + app/ (dist + backend + runtime deps)
+# Download it from the run's "Artifacts" section, or from the Release on a tag.
+
+name: Build Desktop App
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write        # needed for the release job on tag pushes
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+          - os: macos-13          # Intel
+            label: macos-x64
+          - os: macos-14          # Apple Silicon
+            label: macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install build dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build SEA binary
+        run: node sea/build-sea.cjs
+
+      - name: Package output (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path sea/out/FinAnalyzer/* -DestinationPath FinAnalyzer-${{ matrix.label }}.zip
+
+      - name: Package output (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent sea/out/FinAnalyzer FinAnalyzer-${{ matrix.label }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FinAnalyzer-${{ matrix.label }}
+          path: FinAnalyzer-${{ matrix.label }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" artifacts/*.zip
+             --repo "${{ github.repository }}"
+             --title "${{ github.ref_name }}"
+             --generate-notes
