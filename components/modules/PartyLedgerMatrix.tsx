@@ -439,15 +439,21 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
   const [hideZeroActivity, setHideZeroActivity] = useState(true);
 
   // ── Preprocess data on the main thread (fast: one pass) ────────────────────
-  const { primaries, suggestedPrimaries, allLedgers, txRows, mstRows } = useMemo(() => {
+  const { primaries, suggestedPrimaries, allLedgers, ledgerPrimary, txRows, mstRows } = useMemo(() => {
     const p = new Set<string>();
     const l = new Set<string>();
+    const lp = new Map<string, string>(); // ledger → its Tally primary group
     const tx: LedgerEntry[] = [];
     const ms: LedgerEntry[] = [];
     for (let i = 0; i < data.length; i++) {
       const r = data[i];
-      if (String(r.TallyPrimary || '').trim()) p.add(String(r.TallyPrimary).trim());
-      if (String(r.Ledger || '').trim()) l.add(String(r.Ledger).trim());
+      const primary = String(r.TallyPrimary || '').trim();
+      const ledger = String(r.Ledger || '').trim();
+      if (primary) p.add(primary);
+      if (ledger) {
+        l.add(ledger);
+        if (!lp.has(ledger) && primary) lp.set(ledger, primary);
+      }
       if (isMaster(r)) ms.push(r);
       else tx.push(r);
     }
@@ -456,6 +462,7 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
       primaries: allP,
       suggestedPrimaries: allP.filter((x) => /(debtor|creditor)/i.test(x)),
       allLedgers: Array.from(l).sort((a, b) => a.localeCompare(b)),
+      ledgerPrimary: lp,
       txRows: tx,
       mstRows: ms,
     };
@@ -523,14 +530,24 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
     onProfileUpdate(p);
   }, [effectivePrimary, gstLedgers, onProfileUpdate, rcmLedgers, tdsLedgers]);
 
-  const suggestedTds = useMemo(() => allLedgers.filter((x) => /(tds|194)/i.test(x)), [allLedgers]);
+  // A genuine TDS/GST/RCM ledger lives under Duties & Taxes / a liability head —
+  // never under a P&L head. So exclude ledgers whose primary group reads as
+  // sales/income/purchase/expense; otherwise an income ledger that merely
+  // mentions a tax in its name (e.g. "Service Charges Collected (IGST)") gets
+  // mis-suggested as GST and swallows real sales into the GST bucket.
+  const isPlPrimary = (ledger: string) =>
+    /(sale|income|purchase|inward|expense)/i.test(ledgerPrimary.get(ledger) || '');
+  const suggestedTds = useMemo(
+    () => allLedgers.filter((x) => /(tds|194)/i.test(x) && !isPlPrimary(x)),
+    [allLedgers, ledgerPrimary],
+  );
   const suggestedGst = useMemo(
-    () => allLedgers.filter((x) => /(igst|cgst|sgst|utgst|gst|cess)/i.test(x)),
-    [allLedgers],
+    () => allLedgers.filter((x) => /(igst|cgst|sgst|utgst|gst|cess)/i.test(x) && !isPlPrimary(x)),
+    [allLedgers, ledgerPrimary],
   );
   const suggestedRcm = useMemo(
-    () => allLedgers.filter((x) => /(rcm|reverse charge)/i.test(x)),
-    [allLedgers],
+    () => allLedgers.filter((x) => /(rcm|reverse charge)/i.test(x) && !isPlPrimary(x)),
+    [allLedgers, ledgerPrimary],
   );
 
   // ── Web Worker ─────────────────────────────────────────────────────────────
