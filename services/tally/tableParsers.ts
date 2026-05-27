@@ -232,21 +232,26 @@ export const parsePayhead = (r: Row): PayheadMaster => ({
   name: toText(r.name),
 });
 
+// Cost allocations come from three tables whose column names differ slightly:
+//   trn_cost_centre                    → costcentre
+//   trn_cost_category_centre           → costcategory, costcentre
+//   trn_cost_inventory_category_centre → item, costcategory, costcentre
+// Older XLSX exports used the bare `category`/`centre` headers, so accept both.
 export const parseCostAllocation = (r: Row): CostAllocation => ({
   guid: toText(r.guid),
   ledger: toText(r.ledger),
   item: toText(r.item),
-  category: toText(r.category),
-  centre: toText(r.centre),
+  category: toText(r.costcategory ?? r.category),
+  centre: toText(r.costcentre ?? r.centre),
   amount: toNumber(r.amount),
 });
 
 export const parseAttendance = (r: Row): Attendance => ({
   ...r,
   guid: toText(r.guid),
-  employee: toText(r.employee),
-  attendance_type: toText(r.attendance_type),
-  value: toNumber(r.value),
+  employee: toText(r.employee_name ?? r.employee),
+  attendance_type: toText(r.attendancetype_name ?? r.attendance_type),
+  value: toNumber(r.time_value ?? r.type_value ?? r.value),
 });
 
 export const parseBankAllocation = (r: Row): BankAllocation => ({
@@ -254,11 +259,14 @@ export const parseBankAllocation = (r: Row): BankAllocation => ({
   guid: toText(r.guid),
 });
 
+// trn_closingstock_ledger has no guid; its value column is `stock_value`
+// (legacy XLSX exports called it `amount`). `stock_date` is the as-of date.
 export const parseClosingStockLedger = (r: Row): ClosingStockLedger => ({
   ...r,
   guid: toText(r.guid),
   ledger: toText(r.ledger),
-  amount: toNumber(r.amount),
+  stock_date: toIsoDate(r.stock_date),
+  amount: toNumber(r.stock_value ?? r.amount),
 });
 
 export const parseOpeningBatchAllocation = (r: Row): OpeningBatchAllocation => ({

@@ -244,7 +244,8 @@ export interface BankAllocation {
 export interface ClosingStockLedger {
   guid: string;
   ledger: string;
-  amount: number;
+  stock_date: string;            // ISO; as-of date of the closing-stock figure
+  amount: number;                // from stock_value
   [key: string]: any;
 }
 

@@ -326,6 +326,38 @@ export class TallyStore {
     return best;
   }
 
+  // Headline GST percentage for an item as of a date, derived from
+  // mst_gst_effective_rate. Unlike gstRateAt() (which is duty-head-agnostic),
+  // this resolves the *effective* slab: the IGST row's rate, or CGST + SGST
+  // when IGST isn't on file. Returns undefined when the item has no rate rows.
+  // Used to back-fill the per-line gst_rate when mst_stock_item leaves it blank.
+  gstHeadlineRateAt(itemName: string, isoDate: string): number | undefined {
+    if (!this._ratesByItem) this.gstRateAt(itemName, isoDate); // build index
+    const rows = this._ratesByItem!.get(nameKey(itemName));
+    if (!rows || rows.length === 0) return undefined;
+
+    // Latest applicable_from that is on/before the voucher date (fall back to
+    // the earliest slab if every row post-dates it — better than nothing).
+    let asOf = '';
+    for (const r of rows) {
+      if (r.applicable_from && r.applicable_from > isoDate) break;
+      asOf = r.applicable_from;
+    }
+    const slab = rows.filter((r) => r.applicable_from === asOf);
+    const effective = slab.length ? slab : rows;
+
+    const rateOf = (head: RegExp) => {
+      const row = effective.find((r) => head.test((r.duty_head || '').toUpperCase()));
+      return row ? row.rate : 0;
+    };
+    const igst = rateOf(/IGST/);
+    if (igst > 0) return igst;
+    const cgst = rateOf(/CGST/);
+    const sgst = rateOf(/SGST|UTGST/);
+    const sum = cgst + sgst;
+    return sum > 0 ? sum : undefined;
+  }
+
   // ── Legacy shim ─────────────────────────────────────────────────────────
   // Produces the flat-row LedgerEntry[] that every existing module reads.
   // Two row classes are emitted:
@@ -363,6 +395,23 @@ export class TallyStore {
         const firstInvItem = inventory[0]?.item || '';
         const stock = firstInvItem ? this.stockItem(firstInvItem) : undefined;
 
+        // mst_stock_item.gst_rate is frequently blank/0 in Tally exports; the
+        // mst_gst_effective_rate master carries the real HSN-level slab. Use it
+        // to back-fill rate and HSN so downstream GST modules see the rate the
+        // item is actually taxed at, not a placeholder 0.
+        let gstRate = stock?.gst_rate ?? 0;
+        let gstHsn = stock?.gst_hsn_code || '';
+        if (firstInvItem && (!gstRate || !gstHsn)) {
+          if (!gstRate) {
+            const eff = this.gstHeadlineRateAt(firstInvItem, voucher.date);
+            if (eff) gstRate = eff;
+          }
+          if (!gstHsn) {
+            const effRow = this.gstRateAt(firstInvItem, voucher.date);
+            if (effRow?.hsn_code) gstHsn = effRow.hsn_code;
+          }
+        }
+
         const billRefs = this.billRefsFor(voucher.guid).filter(
           (b) => nameKey(b.ledger) === nameKey(line.ledger),
         );
@@ -392,8 +441,8 @@ export class TallyStore {
 
           // Enrichment — optional fields. Existing modules ignore these;
           // new/migrated modules can read them.
-          gst_hsn_code: stock?.gst_hsn_code || '',
-          gst_rate: stock?.gst_rate ?? 0,
+          gst_hsn_code: gstHsn,
+          gst_rate: gstRate,
           gst_taxability: stock?.gst_taxability || '',
           pan: ledger?.it_pan || '',
           gst_registration_type: ledger?.gst_registration_type || '',

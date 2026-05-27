@@ -433,7 +433,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onDataLoaded }) => {
     <div className="max-w-3xl mx-auto mt-20 space-y-6">
       <div className="text-center mb-6 space-y-2">
         <h1 className="text-4xl font-black text-slate-900 tracking-tight">FinAnalyzer Pro</h1>
-        <p className="text-slate-500 text-lg">Import a Tally Excel Export to begin</p>
+        <p className="text-slate-500 text-lg">Import a Tally Export (ZIP) to begin</p>
       </div>
 
       {/* ── Primary: Tally Excel Export ZIP ──────────────────────────────── */}
@@ -445,11 +445,11 @@ const FileUpload: React.FC<FileUploadProps> = ({ onDataLoaded }) => {
                 Primary
               </span>
             </div>
-            <p className="text-base font-bold text-slate-900">Import Tally Excel Export (ZIP)</p>
+            <p className="text-base font-bold text-slate-900">Import Tally Export (ZIP)</p>
             <p className="text-sm text-slate-500 mt-1">
               Drop the ZIP produced by your Tally exporter. Contains masters and transactions
-              as Excel sheets — ledgers, groups, voucher types, stock items, GST effective rates,
-              vouchers, accounting lines, inventory, batches, bills.
+              as CSV (or legacy Excel) tables — ledgers, groups, voucher types, stock items,
+              GST effective rates, vouchers, accounting lines, inventory, batches, bills.
             </p>
           </div>
           <button type="button" onClick={() => zipInputRef.current?.click()}
