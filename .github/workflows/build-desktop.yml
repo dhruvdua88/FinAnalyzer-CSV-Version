@@ -29,6 +29,9 @@ jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: app
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +50,7 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
+          cache-dependency-path: app/package-lock.json
 
       - name: Install build dependencies
         run: npm ci --no-audit --no-fund
@@ -67,7 +71,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FinAnalyzer-${{ matrix.label }}
-          path: FinAnalyzer-${{ matrix.label }}.zip
+          path: app/FinAnalyzer-${{ matrix.label }}.zip
           if-no-files-found: error
 
   release:
