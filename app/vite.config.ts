@@ -2147,7 +2147,7 @@ export default defineConfig(({ mode }) => {
     // for Tauri / SEA / dev all continue to serve from "/" unchanged.
     const isGhPagesBuild = process.env.DEPLOY_TARGET === 'gh-pages';
     return {
-      base: isGhPagesBuild ? '/finanalyzer/' : '/',
+      base: isGhPagesBuild ? '/FinAnalyzer-CSV-Version/' : '/',
       server: {
         port: 3000,
         host: '0.0.0.0',
