@@ -73,7 +73,9 @@ jobs:
   release:
     name: Publish release
     needs: build
-    if: ${{ github.event_name != 'pull_request' }}
+    # always() so a single-platform build failure still publishes the
+    # binaries that did succeed (the user can test those immediately).
+    if: ${{ always() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -91,6 +93,10 @@ jobs:
             TAG="${{ github.ref_name }}"
           else
             TAG="v1.0.0-desktop"
+          fi
+          if ! ls artifacts/*.zip >/dev/null 2>&1; then
+            echo "No binaries were produced by any build job — nothing to publish."
+            exit 1
           fi
           echo "Publishing release $TAG with assets:"
           ls -la artifacts

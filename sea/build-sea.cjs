@@ -48,20 +48,20 @@ if (args.has('--help')) {
   printHelpAndExit();
 }
 
-// On Windows, npm/npx are .cmd shims; execFileSync won't find the bare name
-// (it does no PATHEXT resolution), so map them to their .cmd form there.
-const resolveBin = (command) =>
-  process.platform === 'win32' && (command === 'npm' || command === 'npx')
-    ? `${command}.cmd`
-    : command;
+// On Windows, npm/npx are .cmd shims. Node >=18.20/20.12/22 refuse to spawn
+// .cmd/.bat via execFile* unless shell:true (CVE-2024-27980), and execFile
+// also does no PATHEXT resolution — so run npm/npx through the shell there.
+// Other commands (node, lipo, codesign) run directly on all platforms.
+const isNpmLike = (command) => command === 'npm' || command === 'npx';
+const useShellFor = (command) => process.platform === 'win32' && isNpmLike(command);
 
 const run = (command, commandArgs, cwd = ROOT_DIR) => {
   process.stdout.write(`\n> ${command} ${commandArgs.join(' ')}\n`);
-  execFileSync(resolveBin(command), commandArgs, { stdio: 'inherit', cwd });
+  execFileSync(command, commandArgs, { stdio: 'inherit', cwd, shell: useShellFor(command) });
 };
 
 const runCapture = (command, commandArgs, cwd = ROOT_DIR) =>
-  execFileSync(resolveBin(command), commandArgs, { cwd, encoding: 'utf8' });
+  execFileSync(command, commandArgs, { cwd, encoding: 'utf8', shell: useShellFor(command) });
 
 const ensureDir = (dirPath) => fs.mkdirSync(dirPath, { recursive: true });
 
