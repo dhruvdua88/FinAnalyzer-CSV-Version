@@ -118,7 +118,7 @@ const isBank = (e: LedgerEntry) => {
 
 // ── Core computation ─────────────────────────────────────────────────────────
 
-function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput {
+export function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput {
   const { txRows, mstRows, primary, tdsLedgers, gstLedgers, rcmLedgers } = input;
 
   if (!primary) {
@@ -425,17 +425,19 @@ function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput {
 
 // ── Worker message handler ───────────────────────────────────────────────────
 
-self.addEventListener('message', (event: MessageEvent<PartyMatrixWorkerInput>) => {
-  try {
-    const result = compute(event.data);
-    (self as any).postMessage(result);
-  } catch (err: any) {
-    (self as any).postMessage({
-      rows: [],
-      voucherDetails: [],
-      partyUniverseCount: 0,
-      unbalancedVoucherCount: 0,
-      error: err?.message ?? 'Party Matrix worker failed',
-    } satisfies PartyMatrixWorkerOutput);
-  }
-});
+if (typeof self !== 'undefined' && typeof (self as any).addEventListener === 'function') {
+  self.addEventListener('message', (event: MessageEvent<PartyMatrixWorkerInput>) => {
+    try {
+      const result = compute(event.data);
+      (self as any).postMessage(result);
+    } catch (err: any) {
+      (self as any).postMessage({
+        rows: [],
+        voucherDetails: [],
+        partyUniverseCount: 0,
+        unbalancedVoucherCount: 0,
+        error: err?.message ?? 'Party Matrix worker failed',
+      } satisfies PartyMatrixWorkerOutput);
+    }
+  });
+}

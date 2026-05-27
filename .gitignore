@@ -58,3 +58,6 @@ FinAnalyzer_Presenter_Notes.md
 # (delete the next line if you want screenshots tracked)
 # SCR-*.png
 FinAnalyzer_v*.zip
+
+# Party-matrix smoke-test output
+party_matrix_smoke.xlsx

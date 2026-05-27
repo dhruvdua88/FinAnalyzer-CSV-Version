@@ -419,7 +419,13 @@ export class TallyStore {
         seenLedgers.add(nameKey(line.ledger));
 
         rows.push({
-          guid: `${voucher.guid}-${line.line_no}-${txIndex++}`,
+          // Row-unique id that still lets consumers recover the parent voucher
+          // guid by stripping the single trailing `-<n>` suffix (see
+          // voucherKey in the worker/views). `txIndex` is globally unique, so
+          // we deliberately append ONE numeric segment only — adding the
+          // per-voucher line_no here would defeat that recovery and split every
+          // voucher into single-line groups.
+          guid: `${voucher.guid}-${txIndex++}`,
           date: voucher.date,
           voucher_type: voucher.voucher_type,
           voucher_number: voucher.voucher_number || `UNKNOWN-${txIndex}`,
