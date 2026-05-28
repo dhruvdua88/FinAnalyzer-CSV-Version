@@ -20,6 +20,7 @@ import {
   buildGLControl,
   buildOrphanGST,
   buildLedgerAudit,
+  buildLineIndex,
   useTallyStore,
   type ItcRow,
   type ItcType,
@@ -33,6 +34,10 @@ interface PurchaseGSTRegisterProps {
   // module migrations don't all force a prop-signature change.
   data: LedgerEntry[];
 }
+
+// localStorage keys for the user's extra GST-input ledger selections.
+const EXTRA_GST_KEY = 'finanalyzer_itc_extra_gst:v1';
+const EXTRA_GST_KEY_LEGACY = 'finanalyzer_itc_extra_gst';
 
 const TYPE_BADGE_CLASS: Record<ItcType, string> = {
   B2B: 'bg-blue-50 text-blue-700 border-blue-200',
@@ -58,11 +63,18 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [showLedgerPicker, setShowLedgerPicker] = useState(false);
   const [extraGstLedgers, setExtraGstLedgers] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem('finanalyzer_itc_extra_gst') || '[]'); } catch { return []; }
+    // Versioned key so a future shape change can ignore old data instead of
+    // crashing on it. Falls back to the unversioned key written by older
+    // builds so saved selections survive the upgrade.
+    try {
+      const raw = localStorage.getItem(EXTRA_GST_KEY) ?? localStorage.getItem(EXTRA_GST_KEY_LEGACY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
   });
 
   useEffect(() => {
-    localStorage.setItem('finanalyzer_itc_extra_gst', JSON.stringify(extraGstLedgers));
+    localStorage.setItem(EXTRA_GST_KEY, JSON.stringify(extraGstLedgers));
   }, [extraGstLedgers]);
 
   // The query operates on the store's full date span by default; we narrow
@@ -86,10 +98,17 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
   const visibleRows = useMemo<ItcRow[]>(() => {
     let rows = allRows;
     if (typeFilter !== 'ALL') rows = rows.filter((r) => r.type === typeFilter);
-    if (activeIssue === 'rcm') rows = issues.rcmReview.filter((r) => rows.includes(r));
-    else if (activeIssue === 'cgstSgst') rows = issues.cgstSgstMismatch.filter((r) => rows.includes(r));
-    else if (activeIssue === 'gstin') rows = issues.blankInvalidGstin.filter((r) => rows.includes(r));
-    else if (activeIssue === 'noInv') rows = issues.noInvoiceNumber.filter((r) => rows.includes(r));
+    if (activeIssue) {
+      // Intersect the chosen issue list with the (type-filtered) rows. Use a
+      // Set for O(1) membership instead of Array.includes (O(n) per row).
+      const inScope = new Set(rows);
+      const issueRows =
+        activeIssue === 'rcm' ? issues.rcmReview
+        : activeIssue === 'cgstSgst' ? issues.cgstSgstMismatch
+        : activeIssue === 'gstin' ? issues.blankInvalidGstin
+        : issues.noInvoiceNumber;
+      rows = issueRows.filter((r) => inScope.has(r));
+    }
     const q = search.trim().toLowerCase();
     if (q) {
       rows = rows.filter((r) =>
@@ -288,10 +307,16 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
       const wsSummary = buildSheet(SUM_HEADERS, sumDataRows, SUM_WIDTHS, sumStyles, SUM_NUM, 'ITC Summary (GSTR-3B)');
       XLSX.utils.book_append_sheet(wb, wsSummary, 'ITC Summary');
 
+      // GL Control and Orphan GST both walk every accounting line; annotate
+      // once here and share the index so the export does a single pass instead
+      // of one per sheet.
+      const exportOpts = { dateFrom, dateTo, gstInputLedgers: extraGstLedgers };
+      const lineIndex = buildLineIndex(store, extraGstLedgers);
+
       // ════════════════════════════════════════════════════════════════════════
       // Sheet 3: GL Control
       // ════════════════════════════════════════════════════════════════════════
-      const glRows = buildGLControl(store, { dateFrom, dateTo, gstInputLedgers: extraGstLedgers });
+      const glRows = buildGLControl(store, exportOpts, lineIndex);
       const GL_HEADERS = [
         'Primary Group',
         'GL: #Vouchers', 'GL: Taxable Value',
@@ -320,7 +345,7 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
       // ════════════════════════════════════════════════════════════════════════
       // Sheet 4: Orphan GST
       // ════════════════════════════════════════════════════════════════════════
-      const orphanRows = buildOrphanGST(store, { dateFrom, dateTo, gstInputLedgers: extraGstLedgers });
+      const orphanRows = buildOrphanGST(store, exportOpts, lineIndex);
       const ORP_HEADERS = [
         'Voucher Date', 'Type', 'Number', 'Ref/Invoice No',
         'Supplier/Party', 'GSTIN', 'Place of Supply',
@@ -397,7 +422,7 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
             <h2 className="text-lg font-bold text-slate-900">Tally Excel Export (ZIP) required</h2>
             <p className="text-sm text-slate-600 mt-1 leading-relaxed">
               The Purchase Register builds the ITC schedule by walking <code>mst_group</code> parent chains
-              and reading <code>mst_ledger.gst_duty_head</code> — fields only the Tally Excel Export ZIP
+              and reading <code>mst_ledger.gst_duty_head</code>: fields only the Tally Excel Export ZIP
               carries. The legacy live-loader import doesn't expose them.
             </p>
             <p className="text-sm text-slate-600 mt-2">
@@ -457,13 +482,14 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text" value={search} onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search purchase register"
             placeholder="Search party, GSTIN, invoice, voucher#, ledger…"
             className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
           />
         </div>
         <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg text-xs font-semibold">
           {(['ALL', 'B2B', 'RCM-UR', 'IMPORTSERVICE'] as const).map((t) => (
-            <button key={t} onClick={() => setTypeFilter(t)}
+            <button key={t} type="button" onClick={() => setTypeFilter(t)}
               className={`px-3 py-1.5 rounded-md transition-colors ${
                 typeFilter === t ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
               }`}>
@@ -472,12 +498,12 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
           ))}
         </div>
         {activeIssue && (
-          <button onClick={() => setActiveIssue(null)}
+          <button type="button" onClick={() => setActiveIssue(null)}
             className="px-3 py-1.5 text-xs font-bold rounded-lg bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100">
             Clear issue filter
           </button>
         )}
-        <button onClick={() => setShowLedgerPicker((p) => !p)}
+        <button type="button" onClick={() => setShowLedgerPicker((p) => !p)}
           className={`px-3 py-1.5 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border transition-colors ${
             showLedgerPicker || extraGstLedgers.length > 0
               ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
@@ -486,7 +512,7 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
           <Settings2 size={13} />
           GST Ledgers{extraGstLedgers.length > 0 ? ` (+${extraGstLedgers.length})` : ''}
         </button>
-        <button onClick={handleExport} disabled={isExporting}
+        <button type="button" onClick={handleExport} disabled={isExporting}
           className="px-4 py-2 inline-flex items-center gap-2 text-sm font-bold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:bg-slate-300 transition-colors shadow-sm">
           <Download size={16} />
           {isExporting ? 'Exporting…' : 'Export Excel'}
@@ -507,7 +533,7 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
               </p>
             </div>
             {extraGstLedgers.length > 0 && (
-              <button onClick={() => setExtraGstLedgers([])}
+              <button type="button" onClick={() => setExtraGstLedgers([])}
                 className="text-xs text-red-600 hover:text-red-700 font-semibold underline underline-offset-2">
                 Clear all
               </button>
@@ -660,7 +686,7 @@ const IssueCard: React.FC<{
   const okState = count === 0;
 
   return (
-    <button onClick={onClick} disabled={okState && !active}
+    <button type="button" onClick={onClick} disabled={okState && !active}
       className={`text-left p-3 rounded-xl border bg-white shadow-sm transition-all ${
         active ? `ring-2 ${c.ring} ${c.border}` : 'border-slate-200 hover:border-slate-300'
       } ${okState ? 'opacity-60 cursor-default' : 'cursor-pointer'}`}>

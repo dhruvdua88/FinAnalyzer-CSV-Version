@@ -185,7 +185,7 @@ export interface ItcQueryOpts {
 // flag, RCM flag, GST sub-type (IGST/CGST/SGST). All lookups go through
 // the store's prebuilt indexes so this stays O(N) over accounting lines.
 
-interface AnnotatedLine {
+export interface AnnotatedLine {
   guid: string;
   ledger: string;
   amount: number;
@@ -234,22 +234,54 @@ const annotateLines = (store: TallyStore, extraGstNames?: Set<string>): Annotate
   return out;
 };
 
+// ── Shared building blocks ───────────────────────────────────────────────────
+//
+// The three register builders (ITC, GL Control, Orphan GST) all need the same
+// "annotate every accounting line, then group by voucher" preamble and the
+// same GST-summing / primary-group logic. Hoisting it here keeps a single
+// source of truth and — via the shared `index` argument — lets a full export
+// annotate the ledger lines once instead of once per sheet.
+
+// Annotate every accounting line once and group by voucher guid for O(1)
+// per-voucher lookup.
+export const buildLineIndex = (
+  store: TallyStore,
+  gstInputLedgers?: string[],
+): Map<string, AnnotatedLine[]> => {
+  const extraGstNames = gstInputLedgers?.length ? new Set(gstInputLedgers.map(nameKey)) : undefined;
+  const linesByGuid = new Map<string, AnnotatedLine[]>();
+  for (const a of annotateLines(store, extraGstNames)) {
+    const list = linesByGuid.get(a.guid);
+    if (list) list.push(a); else linesByGuid.set(a.guid, [a]);
+  }
+  return linesByGuid;
+};
+
+// |Σ amount| over the lines of a single GST sub-type. GST input amounts are
+// normally same-signed, so this matches the per-line abs the Python used.
+const absSumByType = (lines: AnnotatedLine[], kind: 'IGST' | 'CGST' | 'SGST'): number =>
+  Math.abs(lines.filter((l) => l.gstType === kind).reduce((s, l) => s + l.amount, 0));
+
+// Most-frequent (mode) primary group among a voucher's expense lines. Returns
+// '' when the voucher has no classified expense line.
+const modePrimary = (expLines: AnnotatedLine[]): string => {
+  const counts = new Map<string, number>();
+  for (const l of expLines) if (l.primary) counts.set(l.primary, (counts.get(l.primary) || 0) + 1);
+  let best = '';
+  let bestCount = 0;
+  for (const [k, v] of counts) if (v > bestCount) { best = k; bestCount = v; }
+  return best;
+};
+
 // ── Main query ──────────────────────────────────────────────────────────────
 
 export const getPurchaseITCRegister = (
   store: TallyStore,
   opts: ItcQueryOpts = {},
+  index?: Map<string, AnnotatedLine[]>,
 ): ItcRow[] => {
   const { dateFrom, dateTo, gstInputLedgers } = opts;
-  const extraGstNames = gstInputLedgers?.length ? new Set(gstInputLedgers.map(nameKey)) : undefined;
-  const annotated = annotateLines(store, extraGstNames);
-
-  // Group annotated lines by voucher guid for O(1) lookup
-  const linesByGuid = new Map<string, AnnotatedLine[]>();
-  for (const a of annotated) {
-    const list = linesByGuid.get(a.guid);
-    if (list) list.push(a); else linesByGuid.set(a.guid, [a]);
-  }
+  const linesByGuid = index ?? buildLineIndex(store, gstInputLedgers);
 
   // GUIDs of vouchers with at least one eligible expense/purchase/FA line
   const eligibleGuids = new Set<string>();
@@ -270,12 +302,9 @@ export const getPurchaseITCRegister = (
     const rcmInputs = lines.filter((l) => l.isRcm && !l.isRcmPayable);
     const expLines = lines.filter((l) => l.primary != null);
 
-    const sumOfType = (rows: AnnotatedLine[], kind: 'IGST' | 'CGST' | 'SGST') =>
-      Math.abs(rows.filter((l) => l.gstType === kind).reduce((s, l) => s + l.amount, 0));
-
-    const igst = sumOfType(gstLines, 'IGST') + sumOfType(rcmInputs, 'IGST');
-    const cgst = sumOfType(gstLines, 'CGST') + sumOfType(rcmInputs, 'CGST');
-    const sgst = sumOfType(gstLines, 'SGST') + sumOfType(rcmInputs, 'SGST');
+    const igst = absSumByType(gstLines, 'IGST') + absSumByType(rcmInputs, 'IGST');
+    const cgst = absSumByType(gstLines, 'CGST') + absSumByType(rcmInputs, 'CGST');
+    const sgst = absSumByType(gstLines, 'SGST') + absSumByType(rcmInputs, 'SGST');
     const tax = igst + cgst + sgst;
 
     const taxable = Math.abs(expLines.reduce((s, l) => s + l.amount, 0));
@@ -291,13 +320,7 @@ export const getPurchaseITCRegister = (
     }
 
     // Primary group = mode of expense lines' primaries
-    const primaryCounts = new Map<string, number>();
-    for (const l of expLines) if (l.primary) primaryCounts.set(l.primary, (primaryCounts.get(l.primary) || 0) + 1);
-    let primaryGroup = '';
-    let bestCount = 0;
-    for (const [k, v] of primaryCounts.entries()) {
-      if (v > bestCount) { primaryGroup = k; bestCount = v; }
-    }
+    const primaryGroup = modePrimary(expLines);
 
     const partyLedger = store.ledger(voucher.party_name);
     const partyGstin = partyLedger?.gstn || '';
@@ -411,7 +434,6 @@ export const buildItcSummary = (rows: ItcRow[]): ItcSummarySection[] => {
   const out: ItcSummarySection[] = [];
 
   for (const { block, key } of blocks) {
-    const blockRows: ItcSummaryRow[] = [];
     for (const type of types) {
       const typed = rows.filter((r) => r.type === type);
       const byMonth = new Map<string, ItcRow[]>();
@@ -429,11 +451,9 @@ export const buildItcSummary = (rows: ItcRow[]): ItcSummarySection[] => {
       sectionRows.push({ month: 'Section Total', ...sectionTotal, isTotal: true, isGrandTotal: false });
 
       out.push({ block, type, rows: sectionRows });
-      blockRows.push(...sectionRows);
     }
     // BLOCK GRAND TOTAL across all types for this block
-    const blockData = rows;
-    const gt = sumItcRows(blockData);
+    const gt = sumItcRows(rows);
     const lastSection = out[out.length - 1];
     lastSection.rows.push({ month: 'BLOCK GRAND TOTAL', ...gt, isTotal: false, isGrandTotal: true });
   }
@@ -459,14 +479,13 @@ export interface GlControlRow {
   isGrandTotal: boolean;
 }
 
-export const buildGLControl = (store: TallyStore, opts: ItcQueryOpts = {}): GlControlRow[] => {
+export const buildGLControl = (
+  store: TallyStore,
+  opts: ItcQueryOpts = {},
+  index?: Map<string, AnnotatedLine[]>,
+): GlControlRow[] => {
   const { dateFrom, dateTo, gstInputLedgers } = opts;
-  const extraGstNames = gstInputLedgers?.length ? new Set(gstInputLedgers.map(nameKey)) : undefined;
-  const annotated = annotateLines(store, extraGstNames);
-  const linesByGuid = new Map<string, AnnotatedLine[]>();
-  for (const a of annotated) {
-    const list = linesByGuid.get(a.guid); if (list) list.push(a); else linesByGuid.set(a.guid, [a]);
-  }
+  const linesByGuid = index ?? buildLineIndex(store, gstInputLedgers);
 
   // Per primary group accumulators
   const acc = new Map<string, {
@@ -496,10 +515,7 @@ export const buildGLControl = (store: TallyStore, opts: ItcQueryOpts = {}): GlCo
     if (expLines.length === 0) continue;
 
     // Primary group = mode of expense lines
-    const primaryCounts = new Map<string, number>();
-    for (const l of expLines) if (l.primary) primaryCounts.set(l.primary, (primaryCounts.get(l.primary) || 0) + 1);
-    let primaryGroup = ''; let bestCount = 0;
-    for (const [k, v] of primaryCounts.entries()) { if (v > bestCount) { primaryGroup = k; bestCount = v; } }
+    const primaryGroup = modePrimary(expLines);
     if (!primaryGroup) continue;
 
     const a = ensure(primaryGroup);
@@ -510,9 +526,9 @@ export const buildGLControl = (store: TallyStore, opts: ItcQueryOpts = {}): GlCo
     const gstLines = lines.filter((l) => l.isGst && !l.isRcm);
     const rcmInputs = lines.filter((l) => l.isRcm && !l.isRcmPayable);
     const allGstLines = [...gstLines, ...rcmInputs];
-    const igst = Math.abs(allGstLines.filter((l) => l.gstType === 'IGST').reduce((s, l) => s + l.amount, 0));
-    const cgst = Math.abs(allGstLines.filter((l) => l.gstType === 'CGST').reduce((s, l) => s + l.amount, 0));
-    const sgst = Math.abs(allGstLines.filter((l) => l.gstType === 'SGST').reduce((s, l) => s + l.amount, 0));
+    const igst = absSumByType(allGstLines, 'IGST');
+    const cgst = absSumByType(allGstLines, 'CGST');
+    const sgst = absSumByType(allGstLines, 'SGST');
 
     if (igst + cgst + sgst > 0) {
       a.itcVouchers.add(voucher.guid);
@@ -588,14 +604,13 @@ export interface OrphanGstRow {
   issue: string;
 }
 
-export const buildOrphanGST = (store: TallyStore, opts: ItcQueryOpts = {}): OrphanGstRow[] => {
+export const buildOrphanGST = (
+  store: TallyStore,
+  opts: ItcQueryOpts = {},
+  index?: Map<string, AnnotatedLine[]>,
+): OrphanGstRow[] => {
   const { dateFrom, dateTo, gstInputLedgers } = opts;
-  const extraGstNames = gstInputLedgers?.length ? new Set(gstInputLedgers.map(nameKey)) : undefined;
-  const annotated = annotateLines(store, extraGstNames);
-  const linesByGuid = new Map<string, AnnotatedLine[]>();
-  for (const a of annotated) {
-    const list = linesByGuid.get(a.guid); if (list) list.push(a); else linesByGuid.set(a.guid, [a]);
-  }
+  const linesByGuid = index ?? buildLineIndex(store, gstInputLedgers);
 
   const out: OrphanGstRow[] = [];
 
@@ -615,14 +630,14 @@ export const buildOrphanGST = (store: TallyStore, opts: ItcQueryOpts = {}): Orph
     const allGst = [...gstLines, ...rcmInputs];
     if (allGst.length === 0) continue;  // no GST at all
 
-    const igst = Math.abs(allGst.filter((l) => l.gstType === 'IGST').reduce((s, l) => s + l.amount, 0));
-    const cgst = Math.abs(allGst.filter((l) => l.gstType === 'CGST').reduce((s, l) => s + l.amount, 0));
-    const sgst = Math.abs(allGst.filter((l) => l.gstType === 'SGST').reduce((s, l) => s + l.amount, 0));
+    const igst = absSumByType(allGst, 'IGST');
+    const cgst = absSumByType(allGst, 'CGST');
+    const sgst = absSumByType(allGst, 'SGST');
     const totalGst = igst + cgst + sgst;
     if (totalGst === 0) continue;
 
     const partyLedger = store.ledger(voucher.party_name);
-    const allLedgerNames = [...new Set(lines.map((l) => l.ledger).filter(Boolean))].join(', ');
+    const allLedgerNames = [...new Set(lines.flatMap((l) => (l.ledger ? [l.ledger] : [])))].join(', ');
 
     const issues: string[] = [];
     if (!isValidGstin(partyLedger?.gstn || '')) issues.push('Blank/Invalid GSTIN');
