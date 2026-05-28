@@ -175,6 +175,7 @@ export interface ItcRow {
 export interface ItcQueryOpts {
   dateFrom?: string;        // ISO, inclusive
   dateTo?: string;          // ISO, inclusive
+  gstInputLedgers?: string[];  // extra ledger names to treat as GST input (supplements auto-detection)
 }
 
 // ── Per-line annotation ────────────────────────────────────────────────────
@@ -195,7 +196,7 @@ interface AnnotatedLine {
   gstType: 'IGST' | 'CGST' | 'SGST' | 'OTHER_GST' | null;
 }
 
-const annotateLines = (store: TallyStore): AnnotatedLine[] => {
+const annotateLines = (store: TallyStore, extraGstNames?: Set<string>): AnnotatedLine[] => {
   const out: AnnotatedLine[] = [];
   for (const line of store.accountingLines) {
     const ledger = store.ledger(line.ledger);
@@ -208,7 +209,7 @@ const annotateLines = (store: TallyStore): AnnotatedLine[] => {
       });
       continue;
     }
-    const isGst = isInputGstLedger(ledger);
+    const isGst = isInputGstLedger(ledger) || (extraGstNames != null && extraGstNames.has(nameKey(ledger.name)));
     const isRcm = isGst && isRcmLedger(ledger.name);
     const isRcmPayable = isRcm && isRcmPayableLedger(ledger.name);
     const gstType = isGst ? classifyGstType(ledger.name, ledger.gst_duty_head) : null;
@@ -239,8 +240,9 @@ export const getPurchaseITCRegister = (
   store: TallyStore,
   opts: ItcQueryOpts = {},
 ): ItcRow[] => {
-  const { dateFrom, dateTo } = opts;
-  const annotated = annotateLines(store);
+  const { dateFrom, dateTo, gstInputLedgers } = opts;
+  const extraGstNames = gstInputLedgers?.length ? new Set(gstInputLedgers.map(nameKey)) : undefined;
+  const annotated = annotateLines(store, extraGstNames);
 
   // Group annotated lines by voucher guid for O(1) lookup
   const linesByGuid = new Map<string, AnnotatedLine[]>();
@@ -458,8 +460,9 @@ export interface GlControlRow {
 }
 
 export const buildGLControl = (store: TallyStore, opts: ItcQueryOpts = {}): GlControlRow[] => {
-  const { dateFrom, dateTo } = opts;
-  const annotated = annotateLines(store);
+  const { dateFrom, dateTo, gstInputLedgers } = opts;
+  const extraGstNames = gstInputLedgers?.length ? new Set(gstInputLedgers.map(nameKey)) : undefined;
+  const annotated = annotateLines(store, extraGstNames);
   const linesByGuid = new Map<string, AnnotatedLine[]>();
   for (const a of annotated) {
     const list = linesByGuid.get(a.guid); if (list) list.push(a); else linesByGuid.set(a.guid, [a]);
@@ -586,8 +589,9 @@ export interface OrphanGstRow {
 }
 
 export const buildOrphanGST = (store: TallyStore, opts: ItcQueryOpts = {}): OrphanGstRow[] => {
-  const { dateFrom, dateTo } = opts;
-  const annotated = annotateLines(store);
+  const { dateFrom, dateTo, gstInputLedgers } = opts;
+  const extraGstNames = gstInputLedgers?.length ? new Set(gstInputLedgers.map(nameKey)) : undefined;
+  const annotated = annotateLines(store, extraGstNames);
   const linesByGuid = new Map<string, AnnotatedLine[]>();
   for (const a of annotated) {
     const list = linesByGuid.get(a.guid); if (list) list.push(a); else linesByGuid.set(a.guid, [a]);
