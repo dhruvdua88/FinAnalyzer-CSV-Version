@@ -17,6 +17,7 @@ on:
       - feature/tally-xlsx-import
       - main
       - claude/zen-pascal-WpQk7
+      - claude/relaxed-ramanujan-OfMFv
   workflow_dispatch:        # lets you trigger a deploy manually from the Actions tab
 
 # Only one Pages deployment can run at a time; cancel the older one if a
