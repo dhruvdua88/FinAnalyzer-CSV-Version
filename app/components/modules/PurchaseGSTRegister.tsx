@@ -16,6 +16,10 @@ import {
   getPurchaseITCRegister,
   deriveItcIssues,
   dateRangeOf,
+  buildItcSummary,
+  buildGLControl,
+  buildOrphanGST,
+  buildLedgerAudit,
   useTallyStore,
   type ItcRow,
   type ItcType,
@@ -45,36 +49,6 @@ const formatDDMMYYYY = (iso: string): string => {
   return m ? `${m[3]}/${m[2]}/${m[1]}` : iso;
 };
 
-// Spread an ItcRow into the column shape used by the Excel export. Keeping
-// labels human-readable so the workbook is meaningful straight out of the
-// download.
-const toExcelRow = (r: ItcRow) => ({
-  'Party GSTIN/UIN': r.partyGstinUin,
-  'Party Name': r.partyName,
-  'Vch No.': r.vchNo,
-  'Date': formatDDMMYYYY(r.date),
-  'Taxable': r.taxable,
-  'IGST': r.igst,
-  'CGST': r.cgst,
-  'SGST': r.sgst,
-  'Tax': r.tax,
-  'Place of Supply': r.placeOfSupply,
-  'Reverse Charge': r.reverseCharge,
-  'ITC Availability': r.itcAvailability,
-  'Type': r.type,
-  '3B Month': r.m3b,
-  'Books Month': r.booksMonth,
-  'FY': r.fy,
-  'Posting Date': formatDDMMYYYY(r.postingDate),
-  'Expense Ledgers': r.expenseLedgers,
-  'Voucher Type': r.voucherType,
-  'Voucher Number': r.voucherNumber,
-  'Primary Group': r.primaryGroup,
-  'ITC Type': r.itcType,
-  'Narration': r.narration,
-  'Review Flag': r.reviewFlag,
-  'GUID': r.guid,
-});
 
 const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
   const store = useTallyStore();
@@ -127,15 +101,271 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
   }, [visibleRows]);
 
   const handleExport = async () => {
-    if (allRows.length === 0) return;
+    if (!store || allRows.length === 0) return;
     setIsExporting(true);
     try {
-      const XLSX = await import('xlsx');
-      const exportRows = allRows.map(toExcelRow);
-      const ws = XLSX.utils.json_to_sheet(exportRows);
+      const XLSX = await import('xlsx-js-style');
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'ITC');
       const stamp = new Date().toISOString().slice(0, 10);
+
+      // ── colour palette ────────────────────────────────────────────────────
+      const CLR = {
+        HEADER_BG: '1E3A5F',
+        HEADER_FG: 'FFFFFF',
+        ALT_BG:    'F1F5F9',
+        ORANGE:    'FFF3CD',
+        ORANGE_FG: '856404',
+        RED:       'FFE4E4',
+        RED_FG:    'C0392B',
+        TOTAL_BG:  'FFA500',
+        TOTAL_FG:  '000000',
+        GRAND_BG:  '1E3A5F',
+        GRAND_FG:  'FFFFFF',
+        GREEN_BG:  'E8F5E9',
+        AMBER_BG:  'FFF3E0',
+        MISS_BG:   'FFEBEE',
+        BORDER:    'CBD5E1',
+        WHITE:     'FFFFFF',
+      } as const;
+
+      type XlsxCell = {
+        v: string | number;
+        t: 's' | 'n';
+        s?: Record<string, unknown>;
+      };
+
+      const border = {
+        top:    { style: 'thin', color: { rgb: CLR.BORDER } },
+        bottom: { style: 'thin', color: { rgb: CLR.BORDER } },
+        left:   { style: 'thin', color: { rgb: CLR.BORDER } },
+        right:  { style: 'thin', color: { rgb: CLR.BORDER } },
+      };
+
+      const mkCell = (v: string | number, bold = false, bg?: string, fg?: string, right = false, numFmt?: string): XlsxCell => ({
+        v,
+        t: typeof v === 'number' ? 'n' : 's',
+        s: {
+          font: { name: 'Calibri', sz: 10, bold, color: { rgb: fg || '334155' } },
+          fill: bg ? { fgColor: { rgb: bg } } : { fgColor: { rgb: CLR.WHITE } },
+          alignment: { horizontal: right ? 'right' : 'left', vertical: 'center', wrapText: false },
+          border,
+          ...(numFmt ? { numFmt } : {}),
+        },
+      });
+
+      const hdrCell = (v: string): XlsxCell => mkCell(v, true, CLR.HEADER_BG, CLR.HEADER_FG);
+      const numFmt = '0.00';   // plain decimal, no thousands separator — matches Python
+
+      // ── helper: write a cell-by-cell sheet from header + data rows ────────
+      const buildSheet = (
+        headers: string[],
+        dataRows: Array<Array<string | number>>,
+        colWidths: number[],
+        rowStyles: Array<{ bg: string; fg: string } | null>,
+        isNumCol: boolean[],
+        titleText?: string,
+      ) => {
+        const ws: Record<string, unknown> = {};
+        let R = 0;
+
+        if (titleText) {
+          // Row 0: merged title
+          for (let c = 0; c < headers.length; c++) {
+            ws[XLSX.utils.encode_cell({ r: R, c })] = c === 0
+              ? { v: titleText, t: 's', s: { font: { name: 'Calibri', sz: 12, bold: true, color: { rgb: CLR.HEADER_FG } }, fill: { fgColor: { rgb: CLR.HEADER_BG } }, alignment: { horizontal: 'center', vertical: 'center' }, border } }
+              : { v: '', t: 's', s: { fill: { fgColor: { rgb: CLR.HEADER_BG } }, border } };
+          }
+          R++;
+          // Row 1: blank
+          for (let c = 0; c < headers.length; c++) ws[XLSX.utils.encode_cell({ r: R, c })] = { v: '', t: 's', s: { fill: { fgColor: { rgb: CLR.WHITE } } } };
+          R++;
+        }
+
+        const hdrRow = R;
+        for (let c = 0; c < headers.length; c++) ws[XLSX.utils.encode_cell({ r: R, c })] = hdrCell(headers[c]);
+        R++;
+
+        for (let i = 0; i < dataRows.length; i++) {
+          const row = dataRows[i];
+          const style = rowStyles[i];
+          const altBg = i % 2 === 0 ? CLR.WHITE : CLR.ALT_BG;
+          for (let c = 0; c < headers.length; c++) {
+            const v = c < row.length ? row[c] : '';
+            const bg = style?.bg || altBg;
+            const fg = style?.fg;
+            ws[XLSX.utils.encode_cell({ r: R, c })] = mkCell(
+              v,
+              false,
+              bg,
+              fg,
+              isNumCol[c],
+              isNumCol[c] && typeof v === 'number' ? numFmt : undefined,
+            );
+          }
+          R++;
+        }
+
+        ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: R - 1, c: headers.length - 1 } });
+        ws['!cols'] = colWidths.map((w) => ({ wch: w }));
+        ws['!rows'] = Array.from({ length: R }, (_, i) => ({ hpx: i === 0 && titleText ? 22 : 18 }));
+        if (titleText) {
+          ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
+          ws['!freeze'] = { xSplit: 0, ySplit: hdrRow + 1 };
+        } else {
+          ws['!freeze'] = { xSplit: 0, ySplit: 1 };
+        }
+        ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: hdrRow, c: 0 }, e: { r: hdrRow, c: headers.length - 1 } }) };
+
+        return ws;
+      };
+
+      // ════════════════════════════════════════════════════════════════════════
+      // Sheet 1: ITC
+      // ════════════════════════════════════════════════════════════════════════
+      const ITC_HEADERS = [
+        'Party GSTIN/UIN', 'Party Name', 'Vch No.', 'Date',
+        'Taxable', 'IGST', 'CGST', 'SGST', 'Tax',
+        'Place of Supply', 'Reverse Charge', 'ITC Availability',
+        'Type', '3B Month', 'Books Month', 'FY', 'Posting Date',
+        'Expense Ledgers', 'Voucher Type', 'Voucher Number',
+        'Primary Group', 'ITC Type', 'Narration', 'Review Flag', 'GUID',
+      ];
+      const ITC_NUM = ITC_HEADERS.map((h) => ['Taxable','IGST','CGST','SGST','Tax'].includes(h));
+      const ITC_WIDTHS = [22,28,18,12,14,12,12,12,14,18,8,8,14,12,12,8,12,40,16,16,20,16,40,8,36];
+
+      const itcDataRows = allRows.map((r) => [
+        r.partyGstinUin, r.partyName, r.vchNo, formatDDMMYYYY(r.date),
+        r.taxable, r.igst, r.cgst, r.sgst, r.tax,
+        r.placeOfSupply, r.reverseCharge, r.itcAvailability,
+        r.type, r.m3b, r.booksMonth, r.fy, formatDDMMYYYY(r.postingDate),
+        r.expenseLedgers, r.voucherType, r.voucherNumber,
+        r.primaryGroup, r.itcType, r.narration, r.reviewFlag, r.guid,
+      ] as Array<string | number>);
+
+      const itcRowStyles = allRows.map((r): { bg: string; fg: string } | null => {
+        if (Math.abs(r.cgst - r.sgst) > 0.005) return { bg: CLR.RED, fg: CLR.RED_FG };
+        if (r.tax === 0) return { bg: CLR.ORANGE, fg: CLR.ORANGE_FG };
+        return null;
+      });
+
+      const wsItc = buildSheet(ITC_HEADERS, itcDataRows, ITC_WIDTHS, itcRowStyles, ITC_NUM, 'Purchase ITC Register');
+      XLSX.utils.book_append_sheet(wb, wsItc, 'ITC');
+
+      // ════════════════════════════════════════════════════════════════════════
+      // Sheet 2: ITC Summary
+      // ════════════════════════════════════════════════════════════════════════
+      const summary = buildItcSummary(allRows);
+      const SUM_HEADERS = ['Block', 'ITC Type', 'Month', 'Count', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total GST'];
+      const SUM_NUM = [false, false, false, true, true, true, true, true, true];
+      const SUM_WIDTHS = [14, 16, 16, 10, 16, 14, 14, 14, 14];
+
+      const sumDataRows: Array<Array<string | number>> = [];
+      const sumStyles: Array<{ bg: string; fg: string } | null> = [];
+      for (const sec of summary) {
+        for (const row of sec.rows) {
+          sumDataRows.push([
+            sec.block, sec.type, row.month,
+            row.count, row.taxable, row.igst, row.cgst, row.sgst, row.tax,
+          ]);
+          if (row.isGrandTotal) sumStyles.push({ bg: CLR.GRAND_BG, fg: CLR.GRAND_FG });
+          else if (row.isTotal) sumStyles.push({ bg: CLR.TOTAL_BG, fg: CLR.TOTAL_FG });
+          else sumStyles.push(null);
+        }
+      }
+      const wsSummary = buildSheet(SUM_HEADERS, sumDataRows, SUM_WIDTHS, sumStyles, SUM_NUM, 'ITC Summary (GSTR-3B)');
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'ITC Summary');
+
+      // ════════════════════════════════════════════════════════════════════════
+      // Sheet 3: GL Control
+      // ════════════════════════════════════════════════════════════════════════
+      const glRows = buildGLControl(store, { dateFrom, dateTo });
+      const GL_HEADERS = [
+        'Primary Group',
+        'GL: #Vouchers', 'GL: Taxable Value',
+        'ITC: #Vouchers', 'ITC: Taxable Value',
+        'ITC: IGST', 'ITC: CGST', 'ITC: SGST', 'ITC: Total GST',
+        'No-GST: #Vouchers', 'No-GST: Taxable Value',
+        '% ITC Coverage',
+      ];
+      const GL_NUM = [false, true, true, true, true, true, true, true, true, true, true, true];
+      const GL_WIDTHS = [22, 14, 18, 14, 18, 14, 14, 14, 16, 16, 18, 16];
+
+      const glDataRows = glRows.map((r) => [
+        r.primaryGroup,
+        r.glVouchers, r.glTaxable,
+        r.itcVouchers, r.itcTaxable,
+        r.itcIgst, r.itcCgst, r.itcSgst, r.itcTotalGst,
+        r.noGstVouchers, r.noGstTaxable,
+        r.itcCoverage,
+      ] as Array<string | number>);
+      const glStyles = glRows.map((r): { bg: string; fg: string } | null =>
+        r.isGrandTotal ? { bg: CLR.GRAND_BG, fg: CLR.GRAND_FG } : null
+      );
+      const wsGL = buildSheet(GL_HEADERS, glDataRows, GL_WIDTHS, glStyles, GL_NUM, 'GL Control (ITC Coverage)');
+      XLSX.utils.book_append_sheet(wb, wsGL, 'GL Control');
+
+      // ════════════════════════════════════════════════════════════════════════
+      // Sheet 4: Orphan GST
+      // ════════════════════════════════════════════════════════════════════════
+      const orphanRows = buildOrphanGST(store, { dateFrom, dateTo });
+      const ORP_HEADERS = [
+        'Voucher Date', 'Type', 'Number', 'Ref/Invoice No',
+        'Supplier/Party', 'GSTIN', 'Place of Supply',
+        'IGST', 'CGST', 'SGST/UTGST', 'Total GST',
+        'All Ledgers in Voucher', 'Narration', 'Issue',
+      ];
+      const ORP_NUM = [false, false, false, false, false, false, false, true, true, true, true, false, false, false];
+      const ORP_WIDTHS = [12, 14, 14, 18, 28, 22, 16, 12, 12, 12, 14, 50, 40, 30];
+
+      const orpDataRows = orphanRows.map((r) => [
+        formatDDMMYYYY(r.date), r.voucherType, r.voucherNumber, r.invoiceNo,
+        r.partyName, r.partyGstin, r.placeOfSupply,
+        r.igst, r.cgst, r.sgst, r.totalGst,
+        r.allLedgers, r.narration, r.issue,
+      ] as Array<string | number>);
+      const orpStyles: Array<{ bg: string; fg: string } | null> = orphanRows.map((r) =>
+        r.issue ? { bg: CLR.ORANGE, fg: CLR.ORANGE_FG } : null
+      );
+      const wsOrphan = buildSheet(ORP_HEADERS, orpDataRows, ORP_WIDTHS, orpStyles, ORP_NUM, 'Orphan GST (no expense/purchase line)');
+      XLSX.utils.book_append_sheet(wb, wsOrphan, 'Orphan GST');
+
+      // ════════════════════════════════════════════════════════════════════════
+      // Sheet 5: GST Ledger Audit
+      // ════════════════════════════════════════════════════════════════════════
+      const auditRows = buildLedgerAudit(store);
+      const AUD_HEADERS = ['Ledger Name', 'Parent Group', 'Primary Group', 'GST Duty Head', 'Category', 'Reason'];
+      const AUD_NUM = [false, false, false, false, false, false];
+      const AUD_WIDTHS = [36, 24, 22, 20, 16, 60];
+
+      const catBg: Record<string, string> = { 'Selected': CLR.GREEN_BG, 'Potential Miss': CLR.MISS_BG, 'Excluded': CLR.AMBER_BG };
+      const audDataRows = auditRows.map((r) => [r.ledgerName, r.parentGroup, r.primaryGroup, r.gstDutyHead, r.category, r.reason] as Array<string | number>);
+      const audStyles = auditRows.map((r): { bg: string; fg: string } | null => ({ bg: catBg[r.category] || CLR.WHITE, fg: '334155' }));
+      const wsAudit = buildSheet(AUD_HEADERS, audDataRows, AUD_WIDTHS, audStyles, AUD_NUM, 'GST Ledger Audit');
+      XLSX.utils.book_append_sheet(wb, wsAudit, 'GST Ledger Audit');
+
+      // ════════════════════════════════════════════════════════════════════════
+      // Sheet 6: Info
+      // ════════════════════════════════════════════════════════════════════════
+      const wsInfo: Record<string, unknown> = {};
+      const infoRows: Array<[string, string]> = [
+        ['Report', 'Purchase ITC Register'],
+        ['Generated On', new Date().toLocaleString('en-IN')],
+        ['Period From', dateFrom || 'N/A'],
+        ['Period To', dateTo || 'N/A'],
+        ['Total Vouchers', String(allRows.length)],
+        ['Total Taxable', allRows.reduce((s, r) => s + r.taxable, 0).toFixed(2)],
+        ['Total GST', allRows.reduce((s, r) => s + r.tax, 0).toFixed(2)],
+        ['Orphan GST Vouchers', String(orphanRows.length)],
+        ['Potential Miss Ledgers', String(auditRows.filter((r) => r.category === 'Potential Miss').length)],
+      ];
+      infoRows.forEach(([k, v], i) => {
+        wsInfo[XLSX.utils.encode_cell({ r: i, c: 0 })] = mkCell(k, true, CLR.HEADER_BG, CLR.HEADER_FG);
+        wsInfo[XLSX.utils.encode_cell({ r: i, c: 1 })] = mkCell(v, false);
+      });
+      wsInfo['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: infoRows.length - 1, c: 1 } });
+      wsInfo['!cols'] = [{ wch: 28 }, { wch: 36 }];
+      XLSX.utils.book_append_sheet(wb, wsInfo, 'Info');
+
       XLSX.writeFile(wb, `Purchase_Register_ITC_${stamp}.xlsx`, { compression: true });
     } finally {
       setIsExporting(false);

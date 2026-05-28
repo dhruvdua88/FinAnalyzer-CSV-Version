@@ -373,6 +373,348 @@ export const deriveItcIssues = (rows: ItcRow[]): ItcIssues => {
   return { rcmReview, cgstSgstMismatch, blankInvalidGstin, noInvoiceNumber };
 };
 
+// ── ITC Summary ─────────────────────────────────────────────────────────────
+
+export interface ItcSummaryRow {
+  month: string;           // 'January', 'February', …, or 'Section Total' / 'BLOCK GRAND TOTAL'
+  taxable: number;
+  igst: number;
+  cgst: number;
+  sgst: number;
+  tax: number;
+  count: number;
+  isTotal: boolean;
+  isGrandTotal: boolean;
+}
+
+export interface ItcSummarySection {
+  block: 'Books Month' | '3B Month';
+  type: ItcType;
+  rows: ItcSummaryRow[];   // month rows + Section Total + BLOCK GRAND TOTAL
+}
+
+const sumItcRows = (rows: ItcRow[]): Omit<ItcSummaryRow, 'month' | 'isTotal' | 'isGrandTotal'> => {
+  let taxable = 0, igst = 0, cgst = 0, sgst = 0, tax = 0;
+  for (const r of rows) { taxable += r.taxable; igst += r.igst; cgst += r.cgst; sgst += r.sgst; tax += r.tax; }
+  return { taxable: Math.round(taxable * 100) / 100, igst: Math.round(igst * 100) / 100, cgst: Math.round(cgst * 100) / 100, sgst: Math.round(sgst * 100) / 100, tax: Math.round(tax * 100) / 100, count: rows.length };
+};
+
+export const buildItcSummary = (rows: ItcRow[]): ItcSummarySection[] => {
+  const types: ItcType[] = ['B2B', 'RCM-UR', 'IMPORTSERVICE'];
+  const blocks: Array<{ block: 'Books Month' | '3B Month'; key: 'booksMonth' | 'm3b' }> = [
+    { block: 'Books Month', key: 'booksMonth' },
+    { block: '3B Month',    key: 'm3b' },
+  ];
+
+  const out: ItcSummarySection[] = [];
+
+  for (const { block, key } of blocks) {
+    const blockRows: ItcSummaryRow[] = [];
+    for (const type of types) {
+      const typed = rows.filter((r) => r.type === type);
+      const byMonth = new Map<string, ItcRow[]>();
+      for (const r of typed) {
+        const m = r[key];
+        const list = byMonth.get(m); if (list) list.push(r); else byMonth.set(m, [r]);
+      }
+      const monthOrder = MONTH_NAMES.filter((m) => byMonth.has(m));
+      const sectionRows: ItcSummaryRow[] = [];
+      for (const m of monthOrder) {
+        const s = sumItcRows(byMonth.get(m)!);
+        sectionRows.push({ month: m, ...s, isTotal: false, isGrandTotal: false });
+      }
+      const sectionTotal = sumItcRows(typed);
+      sectionRows.push({ month: 'Section Total', ...sectionTotal, isTotal: true, isGrandTotal: false });
+
+      out.push({ block, type, rows: sectionRows });
+      blockRows.push(...sectionRows);
+    }
+    // BLOCK GRAND TOTAL across all types for this block
+    const blockData = rows;
+    const gt = sumItcRows(blockData);
+    const lastSection = out[out.length - 1];
+    lastSection.rows.push({ month: 'BLOCK GRAND TOTAL', ...gt, isTotal: false, isGrandTotal: true });
+  }
+
+  return out;
+};
+
+// ── GL Control ───────────────────────────────────────────────────────────────
+
+export interface GlControlRow {
+  primaryGroup: string;
+  glVouchers: number;
+  glTaxable: number;
+  itcVouchers: number;
+  itcTaxable: number;
+  itcIgst: number;
+  itcCgst: number;
+  itcSgst: number;
+  itcTotalGst: number;
+  noGstVouchers: number;
+  noGstTaxable: number;
+  itcCoverage: number;   // percentage
+  isGrandTotal: boolean;
+}
+
+export const buildGLControl = (store: TallyStore, opts: ItcQueryOpts = {}): GlControlRow[] => {
+  const { dateFrom, dateTo } = opts;
+  const annotated = annotateLines(store);
+  const linesByGuid = new Map<string, AnnotatedLine[]>();
+  for (const a of annotated) {
+    const list = linesByGuid.get(a.guid); if (list) list.push(a); else linesByGuid.set(a.guid, [a]);
+  }
+
+  // Per primary group accumulators
+  const acc = new Map<string, {
+    glVouchers: Set<string>; glTaxable: number;
+    itcVouchers: Set<string>; itcTaxable: number;
+    itcIgst: number; itcCgst: number; itcSgst: number;
+    noGstVouchers: Set<string>; noGstTaxable: number;
+  }>();
+
+  const ensure = (pg: string) => {
+    if (!acc.has(pg)) acc.set(pg, {
+      glVouchers: new Set(), glTaxable: 0,
+      itcVouchers: new Set(), itcTaxable: 0,
+      itcIgst: 0, itcCgst: 0, itcSgst: 0,
+      noGstVouchers: new Set(), noGstTaxable: 0,
+    });
+    return acc.get(pg)!;
+  };
+
+  for (const voucher of store.vouchers.values()) {
+    if (!voucher.is_accounting_voucher) continue;
+    if (dateFrom && voucher.date && voucher.date < dateFrom) continue;
+    if (dateTo && voucher.date && voucher.date > dateTo) continue;
+
+    const lines = linesByGuid.get(voucher.guid) || [];
+    const expLines = lines.filter((l) => l.primary != null);
+    if (expLines.length === 0) continue;
+
+    // Primary group = mode of expense lines
+    const primaryCounts = new Map<string, number>();
+    for (const l of expLines) if (l.primary) primaryCounts.set(l.primary, (primaryCounts.get(l.primary) || 0) + 1);
+    let primaryGroup = ''; let bestCount = 0;
+    for (const [k, v] of primaryCounts.entries()) { if (v > bestCount) { primaryGroup = k; bestCount = v; } }
+    if (!primaryGroup) continue;
+
+    const a = ensure(primaryGroup);
+    const taxable = Math.abs(expLines.reduce((s, l) => s + l.amount, 0));
+    a.glVouchers.add(voucher.guid);
+    a.glTaxable += taxable;
+
+    const gstLines = lines.filter((l) => l.isGst && !l.isRcm);
+    const rcmInputs = lines.filter((l) => l.isRcm && !l.isRcmPayable);
+    const allGstLines = [...gstLines, ...rcmInputs];
+    const igst = Math.abs(allGstLines.filter((l) => l.gstType === 'IGST').reduce((s, l) => s + l.amount, 0));
+    const cgst = Math.abs(allGstLines.filter((l) => l.gstType === 'CGST').reduce((s, l) => s + l.amount, 0));
+    const sgst = Math.abs(allGstLines.filter((l) => l.gstType === 'SGST').reduce((s, l) => s + l.amount, 0));
+
+    if (igst + cgst + sgst > 0) {
+      a.itcVouchers.add(voucher.guid);
+      a.itcTaxable += taxable;
+      a.itcIgst += igst; a.itcCgst += cgst; a.itcSgst += sgst;
+    } else {
+      a.noGstVouchers.add(voucher.guid);
+      a.noGstTaxable += taxable;
+    }
+  }
+
+  const out: GlControlRow[] = [];
+  let gtGlV = 0, gtGlT = 0, gtItcV = 0, gtItcT = 0, gtIgst = 0, gtCgst = 0, gtSgst = 0, gtNoV = 0, gtNoT = 0;
+
+  for (const pg of TARGET_PRIMARIES) {
+    const a = acc.get(pg);
+    if (!a) continue;
+    const r2 = Math.round;
+    const totalGst = r2((a.itcIgst + a.itcCgst + a.itcSgst) * 100) / 100;
+    const coverage = a.glTaxable > 0 ? Math.round((a.itcTaxable / a.glTaxable) * 10000) / 100 : 0;
+    out.push({
+      primaryGroup: pg,
+      glVouchers: a.glVouchers.size,
+      glTaxable: r2(a.glTaxable * 100) / 100,
+      itcVouchers: a.itcVouchers.size,
+      itcTaxable: r2(a.itcTaxable * 100) / 100,
+      itcIgst: r2(a.itcIgst * 100) / 100,
+      itcCgst: r2(a.itcCgst * 100) / 100,
+      itcSgst: r2(a.itcSgst * 100) / 100,
+      itcTotalGst: totalGst,
+      noGstVouchers: a.noGstVouchers.size,
+      noGstTaxable: r2(a.noGstTaxable * 100) / 100,
+      itcCoverage: coverage,
+      isGrandTotal: false,
+    });
+    gtGlV += a.glVouchers.size; gtGlT += a.glTaxable;
+    gtItcV += a.itcVouchers.size; gtItcT += a.itcTaxable;
+    gtIgst += a.itcIgst; gtCgst += a.itcCgst; gtSgst += a.itcSgst;
+    gtNoV += a.noGstVouchers.size; gtNoT += a.noGstTaxable;
+  }
+
+  const r2 = Math.round;
+  out.push({
+    primaryGroup: 'GRAND TOTAL',
+    glVouchers: gtGlV, glTaxable: r2(gtGlT * 100) / 100,
+    itcVouchers: gtItcV, itcTaxable: r2(gtItcT * 100) / 100,
+    itcIgst: r2(gtIgst * 100) / 100, itcCgst: r2(gtCgst * 100) / 100, itcSgst: r2(gtSgst * 100) / 100,
+    itcTotalGst: r2((gtIgst + gtCgst + gtSgst) * 100) / 100,
+    noGstVouchers: gtNoV, noGstTaxable: r2(gtNoT * 100) / 100,
+    itcCoverage: gtGlT > 0 ? Math.round((gtItcT / gtGlT) * 10000) / 100 : 0,
+    isGrandTotal: true,
+  });
+
+  return out;
+};
+
+// ── Orphan GST ───────────────────────────────────────────────────────────────
+
+export interface OrphanGstRow {
+  date: string;
+  voucherType: string;
+  voucherNumber: string;
+  invoiceNo: string;
+  partyName: string;
+  partyGstin: string;
+  placeOfSupply: string;
+  igst: number;
+  cgst: number;
+  sgst: number;
+  totalGst: number;
+  allLedgers: string;
+  narration: string;
+  issue: string;
+}
+
+export const buildOrphanGST = (store: TallyStore, opts: ItcQueryOpts = {}): OrphanGstRow[] => {
+  const { dateFrom, dateTo } = opts;
+  const annotated = annotateLines(store);
+  const linesByGuid = new Map<string, AnnotatedLine[]>();
+  for (const a of annotated) {
+    const list = linesByGuid.get(a.guid); if (list) list.push(a); else linesByGuid.set(a.guid, [a]);
+  }
+
+  const out: OrphanGstRow[] = [];
+
+  for (const voucher of store.vouchers.values()) {
+    if (!voucher.is_accounting_voucher) continue;
+    const vt = (voucher.voucher_type || '').toLowerCase();
+    if (SKIP_ORPHAN_TYPES.has(vt)) continue;
+    if (dateFrom && voucher.date && voucher.date < dateFrom) continue;
+    if (dateTo && voucher.date && voucher.date > dateTo) continue;
+
+    const lines = linesByGuid.get(voucher.guid) || [];
+    const hasExpense = lines.some((l) => l.primary != null);
+    if (hasExpense) continue;   // normal ITC voucher, not orphan
+
+    const gstLines = lines.filter((l) => l.isGst && !l.isRcm);
+    const rcmInputs = lines.filter((l) => l.isRcm && !l.isRcmPayable);
+    const allGst = [...gstLines, ...rcmInputs];
+    if (allGst.length === 0) continue;  // no GST at all
+
+    const igst = Math.abs(allGst.filter((l) => l.gstType === 'IGST').reduce((s, l) => s + l.amount, 0));
+    const cgst = Math.abs(allGst.filter((l) => l.gstType === 'CGST').reduce((s, l) => s + l.amount, 0));
+    const sgst = Math.abs(allGst.filter((l) => l.gstType === 'SGST').reduce((s, l) => s + l.amount, 0));
+    const totalGst = igst + cgst + sgst;
+    if (totalGst === 0) continue;
+
+    const partyLedger = store.ledger(voucher.party_name);
+    const allLedgerNames = [...new Set(lines.map((l) => l.ledger).filter(Boolean))].join(', ');
+
+    const issues: string[] = [];
+    if (!isValidGstin(partyLedger?.gstn || '')) issues.push('Blank/Invalid GSTIN');
+    if (!(voucher.reference_number || voucher.voucher_number || '').trim()) issues.push('No Invoice No.');
+    if (Math.abs(cgst - sgst) > 0.005) issues.push('CGST≠SGST');
+
+    out.push({
+      date: voucher.date,
+      voucherType: voucher.voucher_type || '',
+      voucherNumber: voucher.voucher_number || '',
+      invoiceNo: (voucher.reference_number || voucher.voucher_number || '').trim(),
+      partyName: voucher.party_name || '',
+      partyGstin: partyLedger?.gstn || '',
+      placeOfSupply: voucher.place_of_supply || '',
+      igst: Math.round(igst * 100) / 100,
+      cgst: Math.round(cgst * 100) / 100,
+      sgst: Math.round(sgst * 100) / 100,
+      totalGst: Math.round(totalGst * 100) / 100,
+      allLedgers: allLedgerNames,
+      narration: voucher.narration || '',
+      issue: issues.join('; '),
+    });
+  }
+
+  out.sort((a, b) => a.date.localeCompare(b.date));
+  return out;
+};
+
+// ── Ledger Audit ─────────────────────────────────────────────────────────────
+
+export type LedgerAuditCategory = 'Selected' | 'Excluded' | 'Potential Miss';
+
+export interface LedgerAuditRow {
+  ledgerName: string;
+  parentGroup: string;
+  primaryGroup: string;
+  gstDutyHead: string;
+  category: LedgerAuditCategory;
+  reason: string;
+}
+
+export const buildLedgerAudit = (store: TallyStore): LedgerAuditRow[] => {
+  const out: LedgerAuditRow[] = [];
+
+  for (const ledger of store.ledgers.values()) {
+    const primary = store.primaryGroupFor(ledger.name);
+    const isExpensePrimary = TARGET_PRIMARIES.has(primary);
+    const isGst = isInputGstLedger(ledger);
+
+    let category: LedgerAuditCategory;
+    let reason: string;
+
+    if (isGst) {
+      category = 'Selected';
+      reason = 'Input GST ledger (included in ITC)';
+    } else if (isExpensePrimary) {
+      category = 'Selected';
+      reason = `Expense ledger under ${primary}`;
+    } else {
+      // Check if it could be a missed GST ledger
+      const name = (ledger.name || '').toUpperCase();
+      const hasGstKeyword = name.includes('GST') || name.includes('IGST') || name.includes('CGST') || name.includes('SGST');
+      const parent = ledger.parent || '';
+      const isDutiesTax = parent === 'Duties & Taxes';
+
+      if (hasGstKeyword || isDutiesTax) {
+        category = 'Potential Miss';
+        reason = isDutiesTax
+          ? `Under "Duties & Taxes" but gst_duty_head blank — may be unclassified GST`
+          : `Name contains GST keyword but not classified as input GST`;
+      } else {
+        category = 'Excluded';
+        reason = `Not an expense primary or GST input (parent: ${parent || 'none'})`;
+      }
+    }
+
+    out.push({
+      ledgerName: ledger.name,
+      parentGroup: ledger.parent || '',
+      primaryGroup: primary,
+      gstDutyHead: ledger.gst_duty_head || '',
+      category,
+      reason,
+    });
+  }
+
+  out.sort((a, b) => {
+    const order: Record<LedgerAuditCategory, number> = { 'Selected': 0, 'Potential Miss': 1, 'Excluded': 2 };
+    const diff = order[a.category] - order[b.category];
+    if (diff !== 0) return diff;
+    return a.ledgerName.localeCompare(b.ledgerName);
+  });
+
+  return out;
+};
+
 // Date range helper for components that have a month-filtered LedgerEntry[]
 // and want to ask the query for "just those months".
 export const dateRangeOf = (rows: { date: string }[]): { dateFrom: string; dateTo: string } => {
