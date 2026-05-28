@@ -1,4 +1,43 @@
-import React, { Suspense, lazy, useState, useEffect, useMemo } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useMemo, Component, type ErrorInfo, type ReactNode } from 'react';
+
+// ── ErrorBoundary ─────────────────────────────────────────────────────────────
+// Catches runtime errors inside any module (lazy chunk crash, null access, etc.)
+// and shows a recoverable message instead of unmounting the entire app.
+class ModuleErrorBoundary extends Component<
+  { children: ReactNode; moduleName: string },
+  { error: Error | null }
+> {
+  constructor(props: { children: ReactNode; moduleName: string }) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[ModuleErrorBoundary]', error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="bg-white border border-red-200 rounded-2xl p-8 shadow-sm">
+          <div className="flex gap-4 items-start">
+            <div className="shrink-0 w-12 h-12 rounded-xl bg-red-50 text-red-600 flex items-center justify-center text-2xl font-bold">!</div>
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">{this.props.moduleName} failed to load</h2>
+              <p className="text-sm text-slate-600 mt-1">{this.state.error.message}</p>
+              <button
+                className="mt-4 px-4 py-2 text-sm font-bold rounded-lg bg-red-600 text-white hover:bg-red-700"
+                onClick={() => this.setState({ error: null })}
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 import FileUpload from './components/FileUpload';
 import { LedgerEntry, AnalysisType, AuditSettings } from './types';
 import { clearSqlData, fetchRowsFromSql, isSqlBackendAvailable, loadRowsIntoSql, SqlLoadSummary } from './services/sqlDataService';
@@ -251,7 +290,7 @@ const App: React.FC = () => {
   useEffect(() => {
     const check = async () => {
       try {
-        const meta = await fetch('/metadata.json').then((r) => r.json());
+        const meta = await fetch(import.meta.env.BASE_URL + 'metadata.json').then((r) => r.json());
         if (!meta?.updateCheckUrl) return;
         const latest = await fetch(meta.updateCheckUrl).then((r) => r.json());
         if (latest?.version && meta?.version && latest.version !== meta.version) {
@@ -640,6 +679,7 @@ const App: React.FC = () => {
             </div>
           ) : (
             <TallyStoreProvider store={store}>
+            <ModuleErrorBoundary moduleName={MODULE_LABELS[activeModule] || 'Module'}>
             <Suspense
               fallback={
                 <div className="bg-white border border-slate-200 rounded-xl p-10 text-center text-slate-500">
@@ -745,6 +785,7 @@ const App: React.FC = () => {
                 />
               )}
             </Suspense>
+            </ModuleErrorBoundary>
             </TallyStoreProvider>
           )}
         </main>
