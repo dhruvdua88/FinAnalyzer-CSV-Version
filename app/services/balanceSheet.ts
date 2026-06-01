@@ -421,8 +421,8 @@ export const branchPeriodsMatch = (branches: BranchData[]): boolean => {
 
 // ─── Balance-sheet computation (all return display-positive amounts) ────────────
 
-const ledgersFor = (b: BranchData, primary: string) => b.ledgers.filter((l) => l.primary === primary);
-const sumClosing = (b: BranchData, primary: string) =>
+export const ledgersFor = (b: BranchData, primary: string) => b.ledgers.filter((l) => l.primary === primary);
+export const sumClosing = (b: BranchData, primary: string) =>
   ledgersFor(b, primary).reduce((s, l) => s + l.closing, 0);
 const sumOpening = (b: BranchData, primary: string) =>
   ledgersFor(b, primary).reduce((s, l) => s + l.opening, 0);
@@ -541,6 +541,104 @@ export const bsReconciliation = (b: BranchData): number =>
   totalAssets(b) - totalEquityLiabilities(b);
 export const currentYearProfit = (b: BranchData): number => b.pnlBalance - b.pnlOpening;
 
+// ─── Statement of Profit & Loss (uses ledger closing_balance, matches Tally) ────
+// Sub-groups of Indirect Expenses carved out on the face of the P&L.
+const FINANCE_COST_PARENTS = new Set(['Finance Costs', 'Finance Cost', 'Interest & Late Filing Fees']);
+const EMPLOYEE_COST_PARENTS = new Set([
+  'Employee benefit expenses',
+  'Contribution to Provident Funds & Others',
+  'Salary',
+  'Salaries',
+  'Staff Salary',
+]);
+
+const pnlByParent = (b: BranchData, primary: string): Record<string, number> => {
+  const out: Record<string, number> = {};
+  for (const l of ledgersFor(b, primary)) out[l.parent] = (out[l.parent] || 0) + l.closing;
+  return out;
+};
+
+export interface FaScheduleRow {
+  name: string;
+  grossOpen: number;
+  additions: number;
+  disposals: number;
+  grossClose: number;
+  deprOpen: number;
+  deprCharge: number;
+  deprClose: number;
+  netOpen: number;
+  netClose: number;
+}
+
+export const fixedAssetsSchedule = (b: BranchData): FaScheduleRow[] => {
+  const by: Record<string, { go: number; gc: number; do_: number; dc: number }> = {};
+  for (const l of ledgersFor(b, 'Fixed Assets')) {
+    const sg = l.parent;
+    by[sg] = by[sg] || { go: 0, gc: 0, do_: 0, dc: 0 };
+    const isDepr = l.name.toLowerCase().includes('depreciation') || l.name.toLowerCase().includes('accumulated');
+    if (isDepr) {
+      by[sg].do_ += l.opening; // credit positive
+      by[sg].dc += l.closing;
+    } else {
+      by[sg].go += -l.opening; // debit negative -> negate
+      by[sg].gc += -l.closing;
+    }
+  }
+  return Object.entries(by)
+    .map(([name, d]) => ({
+      name,
+      grossOpen: d.go,
+      additions: Math.max(0, d.gc - d.go),
+      disposals: Math.max(0, d.go - d.gc),
+      grossClose: d.gc,
+      deprOpen: d.do_,
+      deprCharge: Math.max(0, d.dc - d.do_),
+      deprClose: d.dc,
+      netOpen: d.go - d.do_,
+      netClose: d.gc - d.dc,
+    }))
+    .sort((x, y) => x.name.localeCompare(y.name));
+};
+
+export const revenueFromOps = (b: BranchData): number => sumClosing(b, 'Sales Accounts') + sumClosing(b, 'Direct Incomes');
+export const otherIncome = (b: BranchData): number => sumClosing(b, 'Indirect Incomes');
+export const purchases = (b: BranchData): number => -sumClosing(b, 'Purchase Accounts');
+export const directExpenses = (b: BranchData): number => -sumClosing(b, 'Direct Expenses');
+export const financeCosts = (b: BranchData): number => {
+  const ibd = pnlByParent(b, 'Indirect Expenses');
+  return Object.entries(ibd).reduce((s, [k, v]) => (FINANCE_COST_PARENTS.has(k) ? s - v : s), 0);
+};
+export const employeeCosts = (b: BranchData): number => {
+  const ibd = pnlByParent(b, 'Indirect Expenses');
+  return Object.entries(ibd).reduce((s, [k, v]) => (EMPLOYEE_COST_PARENTS.has(k) ? s - v : s), 0);
+};
+export const depreciationFromFA = (b: BranchData): number =>
+  fixedAssetsSchedule(b).reduce((s, r) => s + r.deprCharge, 0);
+export const otherIndirectExpenses = (b: BranchData): number => {
+  const ibd = pnlByParent(b, 'Indirect Expenses');
+  return Object.entries(ibd).reduce(
+    (s, [k, v]) => (FINANCE_COST_PARENTS.has(k) || EMPLOYEE_COST_PARENTS.has(k) ? s : s - v),
+    0,
+  );
+};
+export const changesInInventories = (b: BranchData): number => openingStock(b) - closingStock(b);
+export const totalExpenses = (b: BranchData): number =>
+  purchases(b) +
+  directExpenses(b) +
+  employeeCosts(b) +
+  financeCosts(b) +
+  depreciationFromFA(b) +
+  otherIndirectExpenses(b) +
+  openingStock(b) -
+  closingStock(b);
+export const totalRevenue = (b: BranchData): number => revenueFromOps(b) + otherIncome(b);
+export const profitBeforeTax = (b: BranchData): number => totalRevenue(b) - totalExpenses(b);
+// Tax is a plug so displayed PAT equals Tally's actual current-year profit (which
+// flows into Reserves & Surplus on the BS) — eliminating P&L↔BS gaps.
+export const taxExpense = (b: BranchData): number => profitBeforeTax(b) - currentYearProfit(b);
+export const profitAfterTax = (b: BranchData): number => profitBeforeTax(b) - taxExpense(b);
+
 // ─── Statement line definitions (drive both single & multi-branch display) ──────
 
 export type LineKind = 'header' | 'line' | 'subtotal' | 'total' | 'plug';
@@ -594,6 +692,23 @@ export const BS_LINE_DEFS: BsLineDef[] = [
   { key: 'total_ca', label: 'Total Current Assets', kind: 'subtotal', fn: totalCurrentAssets, indent: 1 },
 
   { key: 'total_assets', label: 'TOTAL ASSETS', kind: 'total', fn: totalAssets, indent: 0 },
+];
+
+export const PNL_LINE_DEFS: BsLineDef[] = [
+  { key: 'rev', label: 'Revenue from Operations', kind: 'line', fn: revenueFromOps, indent: 1 },
+  { key: 'oi', label: 'Other Income', kind: 'line', fn: otherIncome, indent: 1 },
+  { key: 'total_rev', label: 'Total Revenue', kind: 'subtotal', fn: totalRevenue, indent: 0 },
+  { key: 'EXP_HEAD', label: 'Expenses', kind: 'header' },
+  { key: 'purch', label: 'Cost of Materials / Purchases', kind: 'line', fn: purchases, indent: 2 },
+  { key: 'chg', label: 'Changes in Inventories', kind: 'line', fn: changesInInventories, indent: 2 },
+  { key: 'emp', label: 'Employee Benefits Expense', kind: 'line', fn: employeeCosts, indent: 2 },
+  { key: 'fin', label: 'Finance Costs', kind: 'line', fn: financeCosts, indent: 2 },
+  { key: 'dep', label: 'Depreciation & Amortisation', kind: 'line', fn: depreciationFromFA, indent: 2 },
+  { key: 'oexp', label: 'Other Expenses', kind: 'line', fn: (b) => otherIndirectExpenses(b) + directExpenses(b), indent: 2 },
+  { key: 'total_exp', label: 'Total Expenses', kind: 'subtotal', fn: totalExpenses, indent: 0 },
+  { key: 'pbt', label: 'Profit Before Tax', kind: 'subtotal', fn: profitBeforeTax, indent: 0 },
+  { key: 'tax', label: 'Tax Expense (balancing to Tally P&L A/c)', kind: 'line', fn: taxExpense, indent: 1 },
+  { key: 'pat', label: 'Profit After Tax', kind: 'total', fn: profitAfterTax, indent: 0 },
 ];
 
 export interface BsReport {

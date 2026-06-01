@@ -4,14 +4,17 @@ import { AlertTriangle, Building2, CheckCircle2, Download, FileSpreadsheet, Load
 import { TallyStore, useTallyStore } from '../../services/tally';
 import {
   BS_MAP,
+  BsLineDef,
   BranchData,
   buildBranchFromStore,
   buildReport,
   collectPrimaryGroups,
   EXCLUDE_TARGET,
+  PNL_LINE_DEFS,
   ReclassifyMap,
   STANDARD_PRIMARY_OPTIONS,
 } from '../../services/balanceSheet';
+import { buildFinancialStatementsWorkbook } from '../../services/financialStatementsExcel';
 
 interface BranchEntry {
   id: string;
@@ -40,6 +43,7 @@ const BalanceSheetAnalysis: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showMapping, setShowMapping] = useState(false);
+  const [view, setView] = useState<'bs' | 'pnl'>('bs');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Seed branch 1 from the currently-loaded dataset (if any).
@@ -80,6 +84,16 @@ const BalanceSheetAnalysis: React.FC = () => {
   );
 
   const report = useMemo(() => (branchData.length ? buildReport(branchData) : null), [branchData]);
+
+  // Lines for whichever statement is on screen.
+  const shownLines = useMemo<Array<{ def: BsLineDef; values: number[] }>>(() => {
+    if (!report) return [];
+    if (view === 'bs') return report.lines;
+    return PNL_LINE_DEFS.map((def) => ({
+      def,
+      values: def.fn ? report.columns.map((c) => def.fn!(c)) : report.columns.map(() => 0),
+    }));
+  }, [report, view]);
 
   const primaryGroups = useMemo(
     () => (branches.length ? collectPrimaryGroups(branches.map((b) => ({ store: b.store, branchName: b.branchName })), reclassify) : []),
@@ -128,56 +142,17 @@ const BalanceSheetAnalysis: React.FC = () => {
 
   const exportExcel = () => {
     if (!report) return;
-    const wb = XLSX.utils.book_new();
+    const companyTitle = report.consolidated
+      ? `${report.branches.length} Branches — Consolidated`
+      : branchData[0]?.company || branchData[0]?.branchName || 'Company';
+    const wb = buildFinancialStatementsWorkbook({
+      branches: branchData,
+      consolidated: report.consolidated,
+      companyTitle,
+      periodLabel: report.columns[0]?.periodLabel || '',
+    });
 
-    // ── Sheet 1: Balance Sheet ──
-    const title = report.consolidated
-      ? `Balance Sheet (Schedule III) — Consolidated (${report.branches.length} branches)`
-      : `Balance Sheet (Schedule III) — ${report.columns[0]?.branchName || ''}`;
-    const period = report.columns[0]?.periodLabel ? `As at ${report.columns[0].periodLabel}` : '';
-    const aoa = buildAoa();
-    const meta: (string | number)[][] = [[title], [period], ['(Amounts in INR)'], []];
-    const full = [...meta, ...aoa];
-    const ws = XLSX.utils.aoa_to_sheet(full);
-
-    const nCols = (aoa[0]?.length || 1);
-    ws['!cols'] = [{ wch: 42 }, ...Array.from({ length: nCols - 1 }, () => ({ wch: 20 }))];
-    const headerRowIdx = meta.length; // 0-based row of the column header
-    const bold = { font: { bold: true } };
-    const titleStyle = { font: { bold: true, sz: 13 } };
-    const right = { alignment: { horizontal: 'right' as const } };
-    const moneyFmt = '#,##0;(#,##0)';
-
-    // Style title + meta
-    const setStyle = (r: number, c: number, style: any) => {
-      const ref = XLSX.utils.encode_cell({ r, c });
-      if (ws[ref]) ws[ref].s = { ...(ws[ref].s || {}), ...style };
-    };
-    setStyle(0, 0, titleStyle);
-    // Header row
-    for (let c = 0; c < nCols; c++) setStyle(headerRowIdx, c, { font: { bold: true }, fill: { fgColor: { rgb: 'EEF2FF' } }, alignment: { horizontal: c === 0 ? 'left' : 'right' } });
-
-    // Style body rows by kind + money format
-    let dataRow = headerRowIdx + 1;
-    for (const { def, values } of report.lines) {
-      if (def.kind === 'plug' && values.every((v) => Math.round(v) === 0)) continue;
-      const isStrong = def.kind === 'total' || def.kind === 'subtotal' || def.kind === 'header';
-      for (let c = 0; c < nCols; c++) {
-        const style: any = {};
-        if (isStrong) style.font = { bold: true };
-        if (def.kind === 'total') style.fill = { fgColor: { rgb: 'F1F5F9' } };
-        if (c > 0 && def.kind !== 'header') {
-          style.alignment = { horizontal: 'right' };
-          const ref = XLSX.utils.encode_cell({ r: dataRow, c });
-          if (ws[ref] && typeof ws[ref].v === 'number') ws[ref].z = moneyFmt;
-        }
-        setStyle(dataRow, c, style);
-      }
-      dataRow++;
-    }
-    XLSX.utils.book_append_sheet(wb, ws, 'Balance Sheet');
-
-    // ── Sheet 2: Primary Group Mapping (for reviewer validation) ──
+    // Append the Group Mapping sheet (reviewer validation aid).
     const mapAoa: (string | number)[][] = [
       ['Tally Primary Group', 'Ledgers', 'Closing (indicative)', 'Mapped To', 'Schedule III Head', 'How', 'Branches'],
     ];
@@ -201,10 +176,10 @@ const BalanceSheetAnalysis: React.FC = () => {
     XLSX.utils.book_append_sheet(wb, ws2, 'Group Mapping');
 
     const stamp = (report.columns[0]?.periodTo || '').replace(/-/g, '') || 'export';
-    const co = (report.consolidated ? 'Consolidated' : report.columns[0]?.branchName || 'BS')
+    const co = (report.consolidated ? 'Consolidated' : report.columns[0]?.branchName || 'FS')
       .replace(/[^A-Za-z0-9]+/g, '_')
       .slice(0, 40);
-    XLSX.writeFile(wb, `Balance_Sheet_${co}_${stamp}.xlsx`, { compression: true, cellStyles: true });
+    XLSX.writeFile(wb, `Financial_Statements_${co}_${stamp}.xlsx`, { compression: true, cellStyles: true });
   };
 
   const materialPlug = report
@@ -414,11 +389,31 @@ const BalanceSheetAnalysis: React.FC = () => {
       )}
 
       {report && (
+        <div className="inline-flex rounded-md border border-slate-300 dark:border-slate-600 overflow-hidden text-sm">
+          {(['bs', 'pnl'] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              className={`px-4 py-1.5 font-medium ${
+                view === v
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
+              }`}
+            >
+              {v === 'bs' ? 'Balance Sheet' : 'Statement of P&L'}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {report && (
         <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
           <table className="min-w-full text-sm">
             <thead>
               <tr className="bg-slate-50 dark:bg-slate-800 text-left">
-                <th className="px-4 py-3 font-semibold text-slate-700 dark:text-slate-200">Particulars</th>
+                <th className="px-4 py-3 font-semibold text-slate-700 dark:text-slate-200">
+                  {view === 'bs' ? 'Particulars' : `Statement of P&L — for the year ended ${report.columns[0]?.periodLabel || ''}`}
+                </th>
                 {report.columns.map((c) => (
                   <th
                     key={c.branchName}
@@ -432,7 +427,7 @@ const BalanceSheetAnalysis: React.FC = () => {
               </tr>
             </thead>
             <tbody>
-              {report.lines.map(({ def, values }) => {
+              {shownLines.map(({ def, values }) => {
                 if (def.kind === 'header') {
                   return (
                     <tr key={def.key} className="bg-slate-100/70 dark:bg-slate-800/70">
