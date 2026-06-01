@@ -150,30 +150,8 @@ const BalanceSheetAnalysis: React.FC = () => {
       consolidated: report.consolidated,
       companyTitle,
       periodLabel: report.columns[0]?.periodLabel || '',
+      primaryGroups,
     });
-
-    // Append the Group Mapping sheet (reviewer validation aid).
-    const mapAoa: (string | number)[][] = [
-      ['Tally Primary Group', 'Ledgers', 'Closing (indicative)', 'Mapped To', 'Schedule III Head', 'How', 'Branches'],
-    ];
-    for (const g of primaryGroups) {
-      mapAoa.push([
-        g.rawPrimary,
-        g.count,
-        Math.round(g.closingSum),
-        g.resolution.classified ? g.resolution.primary : '(unmapped — excluded)',
-        g.resolution.classified ? headFor(g.resolution.primary) : '-',
-        g.resolution.how,
-        g.branches.join(', '),
-      ]);
-    }
-    const ws2 = XLSX.utils.aoa_to_sheet(mapAoa);
-    ws2['!cols'] = [{ wch: 30 }, { wch: 9 }, { wch: 20 }, { wch: 24 }, { wch: 26 }, { wch: 14 }, { wch: 30 }];
-    mapAoa[0].forEach((_, c) => {
-      const ref = XLSX.utils.encode_cell({ r: 0, c });
-      if (ws2[ref]) ws2[ref].s = { font: { bold: true }, fill: { fgColor: { rgb: 'EEF2FF' } } };
-    });
-    XLSX.utils.book_append_sheet(wb, ws2, 'Group Mapping');
 
     const stamp = (report.columns[0]?.periodTo || '').replace(/-/g, '') || 'export';
     const co = (report.consolidated ? 'Consolidated' : report.columns[0]?.branchName || 'FS')
