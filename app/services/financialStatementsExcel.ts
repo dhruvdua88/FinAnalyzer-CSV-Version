@@ -16,6 +16,7 @@
 // bottom of this file.
 
 import * as XLSX from 'xlsx-js-style';
+import { AgeingResult, BUCKET_LABELS } from './ageingFifo';
 import {
   BranchData,
   BsLedger,
@@ -185,6 +186,10 @@ export interface FsWorkbookInput {
   primaryGroups?: PrimaryGroupInfo[];
   /** Unit shown once in the title block. Defaults to "(Rs.)". */
   unitLabel?: string;
+  /** FIFO ageing for Trade Payables (Sundry Creditors), consolidated/merged. */
+  payablesAgeing?: AgeingResult;
+  /** FIFO ageing for Trade Receivables (Sundry Debtors), consolidated/merged. */
+  receivablesAgeing?: AgeingResult;
 }
 
 /**
@@ -240,6 +245,8 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
     fn: Fn | null,
     opts: { note?: number; bold?: boolean; total?: boolean; grand?: boolean; muted?: boolean; italic?: boolean } = {},
   ) => {
+    // Hide nil line items (every column rounds to zero) — keep subtotals/totals.
+    if (fn && !opts.total && !opts.grand && columns.every((c) => Math.round(fn(c.data)) === 0)) return;
     const lblStyle = opts.grand
       ? grandTotalLabelStyle()
       : opts.total
@@ -327,6 +334,8 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   r++;
 
   const plLine = (label: string, fn: Fn | null, opts: { bold?: boolean; total?: boolean; grand?: boolean; italic?: boolean } = {}) => {
+    // Hide nil P&L line items (every column zero) — keep subtotals/totals/headers.
+    if (fn && !opts.total && !opts.grand && columns.every((c) => Math.round(fn(c.data)) === 0)) return;
     const lblStyle = opts.grand
       ? grandTotalLabelStyle()
       : opts.total
@@ -428,6 +437,38 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
     return rr;
   };
 
+  // FIFO ageing sub-schedule (used inside N5 Trade Payables & N12 Trade Receivables).
+  // Columns: Party | <buckets> | Outstanding | Advance.  Returns next row.
+  const renderAgeing = (s: Sheet, startRow: number, ageing: AgeingResult, heading: string): number => {
+    let rr = startRow + 1; // blank spacer
+    const lastC = 1 + BUCKET_LABELS.length + 1; // party(0) + buckets + outstanding(+1) [advance separate]
+    const advCol = lastC + 1;
+    s.merge(rr, 0, advCol);
+    s.set(rr, 0, `${heading} — FIFO Ageing (as at ${ageing.asOfIso})  ·  ageing buckets in days`, { s: sectionHeaderStyle(), num: false });
+    rr++;
+    // header
+    s.set(rr, 0, 'Party', { s: columnHeaderStyle(ALIGN.left), num: false });
+    BUCKET_LABELS.forEach((b, i) => s.set(rr, 1 + i, b, { s: columnHeaderStyle(ALIGN.center), num: false }));
+    s.set(rr, lastC, 'Outstanding', { s: columnHeaderStyle(ALIGN.center), num: false });
+    s.set(rr, advCol, 'Advance', { s: columnHeaderStyle(ALIGN.center), num: false });
+    rr++;
+    const z = NUMFMT.accounting;
+    for (const p of ageing.parties) {
+      s.set(rr, 0, multi && p.branch ? `[${p.branch}] ${p.party}` : p.party, { s: labelStyle(), num: false });
+      BUCKET_LABELS.forEach((b, i) => s.set(rr, 1 + i, Math.round(p.buckets[b] || 0), { s: numberStyle(z), num: true }));
+      s.set(rr, lastC, Math.round(p.outstanding), { s: numberStyle(z), num: true });
+      s.set(rr, advCol, Math.round(p.advance), { s: numberStyle(z), num: true });
+      rr++;
+    }
+    // totals
+    s.set(rr, 0, 'Total', { s: subtotalLabelStyle(), num: false });
+    BUCKET_LABELS.forEach((b, i) => s.set(rr, 1 + i, Math.round(ageing.totals[b] || 0), { s: subtotalNumberStyle(z), num: true }));
+    s.set(rr, lastC, Math.round(ageing.grandOutstanding), { s: subtotalNumberStyle(z), num: true });
+    s.set(rr, advCol, Math.round(ageing.grandAdvance), { s: subtotalNumberStyle(z), num: true });
+    rr++;
+    return rr;
+  };
+
   noteSheet(1, 'Share Capital', (s, rr) => {
     for (const l of ledgersFor(totalCol, 'Capital Account')) {
       const lc = l.name.toLowerCase();
@@ -450,7 +491,11 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
     for (const l of ledgersFor(totalCol, 'Bank Accounts')) if (l.closing > 0) rr = noteRow(s, rr, labelFor(l, multi) + ' (credit balance / OD)', Math.round(l.closing));
     return rr;
   }, shortTermBorrowings(totalCol) + bankOdInBankAccounts(totalCol));
-  noteSheet(5, 'Trade Payables', (s, rr) => listLedgers(s, rr, ['Sundry Creditors'], 1), tradePayables(totalCol), { dense: true });
+  noteSheet(5, 'Trade Payables', (s, rr) => {
+    rr = listLedgers(s, rr, ['Sundry Creditors'], 1);
+    if (input.payablesAgeing && input.payablesAgeing.parties.length) rr = renderAgeing(s, rr, input.payablesAgeing, 'Trade Payables');
+    return rr;
+  }, tradePayables(totalCol), { dense: true, cols: input.payablesAgeing ? 10 : 2 });
   noteSheet(6, 'Other Current Liabilities', (s, rr) => listLedgers(s, rr, ['Current Liabilities', 'Branch / Divisions', 'Suspense A/c'], 1, { groupByPrimary: true }), otherCurrentLiabilities(totalCol), { dense: true });
   noteSheet(7, 'Short-Term Provisions', (s, rr) => listLedgers(s, rr, ['Provisions'], 1), shortTermProvisions(totalCol), { dense: true });
 
@@ -474,7 +519,11 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
     rr = noteRow(s, rr, 'Closing Stock (Inventories)', Math.round(closingStock(totalCol)));
     return rr;
   }, closingStock(totalCol));
-  noteSheet(12, 'Trade Receivables', (s, rr) => listLedgers(s, rr, ['Sundry Debtors'], -1), tradeReceivables(totalCol), { dense: true });
+  noteSheet(12, 'Trade Receivables', (s, rr) => {
+    rr = listLedgers(s, rr, ['Sundry Debtors'], -1);
+    if (input.receivablesAgeing && input.receivablesAgeing.parties.length) rr = renderAgeing(s, rr, input.receivablesAgeing, 'Trade Receivables');
+    return rr;
+  }, tradeReceivables(totalCol), { dense: true, cols: input.receivablesAgeing ? 10 : 2 });
   noteSheet(13, 'Cash & Cash Equivalents', (s, rr) => {
     rr = listLedgers(s, rr, ['Cash-in-hand'], -1);
     for (const l of ledgersFor(totalCol, 'Bank Accounts')) if (l.closing < 0) rr = noteRow(s, rr, labelFor(l, multi), Math.round(-l.closing));
@@ -539,6 +588,8 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
 
 // helper: a generic note data row (label + amount in col B).
 function noteRow(s: Sheet, r: number, label: string, amount: number | null, opts: { bold?: boolean; total?: boolean; indent?: number } = {}): number {
+  // Hide nil ledger lines (keep bold group headers and total rows).
+  if (amount !== null && Math.round(amount) === 0 && !opts.total && !opts.bold) return r;
   const lblStyle = opts.total ? subtotalLabelStyle() : labelStyle({ bold: opts.bold });
   s.set(r, 0, '    '.repeat(opts.indent || 0) + label, { s: lblStyle, num: false });
   if (amount !== null) {

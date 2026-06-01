@@ -15,6 +15,7 @@ import {
   STANDARD_PRIMARY_OPTIONS,
 } from '../../services/balanceSheet';
 import { buildFinancialStatementsWorkbook } from '../../services/financialStatementsExcel';
+import { ageParties, mergeAgeing } from '../../services/ageingFifo';
 
 interface BranchEntry {
   id: string;
@@ -85,6 +86,20 @@ const BalanceSheetAnalysis: React.FC = () => {
 
   const report = useMemo(() => (branchData.length ? buildReport(branchData) : null), [branchData]);
 
+  // FIFO ageing for Trade Payables (creditors) + Trade Receivables (debtors),
+  // computed per branch from each store's flat entries, then merged.
+  const ageing = useMemo(() => {
+    if (!branches.length) return null;
+    const multi = branches.length > 1;
+    const pay = branches.map((b, i) =>
+      ageParties(b.store.getLedgerEntries(), 'creditor', branchData[i]?.periodTo || undefined, multi ? b.branchName : undefined),
+    );
+    const rec = branches.map((b, i) =>
+      ageParties(b.store.getLedgerEntries(), 'debtor', branchData[i]?.periodTo || undefined, multi ? b.branchName : undefined),
+    );
+    return { payables: mergeAgeing(pay, 'creditor'), receivables: mergeAgeing(rec, 'debtor') };
+  }, [branches, branchData]);
+
   // Lines for whichever statement is on screen.
   const shownLines = useMemo<Array<{ def: BsLineDef; values: number[] }>>(() => {
     if (!report) return [];
@@ -151,6 +166,8 @@ const BalanceSheetAnalysis: React.FC = () => {
       companyTitle,
       periodLabel: report.columns[0]?.periodLabel || '',
       primaryGroups,
+      payablesAgeing: ageing?.payables,
+      receivablesAgeing: ageing?.receivables,
     });
 
     const stamp = (report.columns[0]?.periodTo || '').replace(/-/g, '') || 'export';
