@@ -477,7 +477,14 @@ export const reservesSurplus = (b: BranchData): number => {
   for (const l of ledgersFor(b, 'Capital Account')) {
     if (l.name.toLowerCase().includes('reserve')) res += l.closing;
   }
-  res += b.pnlBalance; // cumulative P&L not yet transferred
+  // Prior-year retained earnings (P&L A/c opening) + THIS year's voucher-derived
+  // profit. We deliberately use the transaction-derived profit (income − expense
+  // + change in inventory) rather than Tally's synthesised P&L A/c closing
+  // balance: Tally auto-computes that closing without a voucher and it can fail
+  // to reconcile to the underlying transactions, opening a gap on the BS. Using
+  // the voucher-backed profit keeps the P&L tied to the BS, so the only residual
+  // left is a genuine opening-balance difference.
+  res += b.pnlOpening + currentYearProfit(b);
   return res;
 };
 
@@ -539,7 +546,14 @@ export const totalEquityLiabilities = (b: BranchData): number =>
 // Auto-balance plug, shown on the face so the BS always closes.
 export const bsReconciliation = (b: BranchData): number =>
   totalAssets(b) - totalEquityLiabilities(b);
-export const currentYearProfit = (b: BranchData): number => b.pnlBalance - b.pnlOpening;
+// Tally's own booked current-year profit = the movement in the synthesised
+// P&L A/c. Kept for reference / validation only — NOT used in the statements,
+// because Tally computes it without a voucher and it can fail to reconcile to
+// the transactions (see reservesSurplus / currentYearProfit).
+export const bookedCurrentYearProfit = (b: BranchData): number => b.pnlBalance - b.pnlOpening;
+// Voucher-backed current-year profit (income − expense + change in inventory).
+// Defined as profit before tax; ties the P&L to the BS for every dataset.
+export const currentYearProfit = (b: BranchData): number => profitBeforeTax(b);
 
 // ─── Statement of Profit & Loss (uses ledger closing_balance, matches Tally) ────
 // Sub-groups of Indirect Expenses carved out on the face of the P&L.
@@ -634,9 +648,10 @@ export const totalExpenses = (b: BranchData): number =>
   closingStock(b);
 export const totalRevenue = (b: BranchData): number => revenueFromOps(b) + otherIncome(b);
 export const profitBeforeTax = (b: BranchData): number => totalRevenue(b) - totalExpenses(b);
-// Tax is a plug so displayed PAT equals Tally's actual current-year profit (which
-// flows into Reserves & Surplus on the BS) — eliminating P&L↔BS gaps.
-export const taxExpense = (b: BranchData): number => profitBeforeTax(b) - currentYearProfit(b);
+// We no longer plug tax to force PAT to Tally's synthesised figure (that masked
+// the real reconciliation gap as "tax"). Current tax cannot be reliably isolated
+// from a generic Tally export, so it is shown as nil; PAT = PBT (pre-tax result).
+export const taxExpense = (_b: BranchData): number => 0;
 export const profitAfterTax = (b: BranchData): number => profitBeforeTax(b) - taxExpense(b);
 
 // ─── Statement line definitions (drive both single & multi-branch display) ──────
@@ -672,7 +687,7 @@ export const BS_LINE_DEFS: BsLineDef[] = [
   { key: 'provisions', label: 'Short-Term Provisions', kind: 'line', fn: shortTermProvisions, indent: 2 },
   { key: 'total_cl', label: 'Total Current Liabilities', kind: 'subtotal', fn: totalCurrentLiab, indent: 1 },
 
-  { key: 'plug', label: 'Year-end Reconciliation (auto-balance)', kind: 'plug', fn: bsReconciliation, indent: 1 },
+  { key: 'plug', label: 'Opening Balance Difference (pre-existing / auto-balance)', kind: 'plug', fn: bsReconciliation, indent: 1 },
   { key: 'total_el', label: 'TOTAL EQUITY & LIABILITIES', kind: 'total', fn: (b) => totalEquityLiabilities(b) + bsReconciliation(b), indent: 0 },
 
   { key: 'A_HEAD', label: 'ASSETS', kind: 'header' },
@@ -707,7 +722,7 @@ export const PNL_LINE_DEFS: BsLineDef[] = [
   { key: 'oexp', label: 'Other Expenses', kind: 'line', fn: (b) => otherIndirectExpenses(b) + directExpenses(b), indent: 2 },
   { key: 'total_exp', label: 'Total Expenses', kind: 'subtotal', fn: totalExpenses, indent: 0 },
   { key: 'pbt', label: 'Profit Before Tax', kind: 'subtotal', fn: profitBeforeTax, indent: 0 },
-  { key: 'tax', label: 'Tax Expense (balancing to Tally P&L A/c)', kind: 'line', fn: taxExpense, indent: 1 },
+  { key: 'tax', label: 'Tax Expense', kind: 'line', fn: taxExpense, indent: 1 },
   { key: 'pat', label: 'Profit After Tax', kind: 'total', fn: profitAfterTax, indent: 0 },
 ];
 

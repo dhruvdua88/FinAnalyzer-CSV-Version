@@ -13,6 +13,7 @@ import {
   cashAndBank,
   changesInInventories,
   closingStock,
+  currentYearProfit,
   deferredTaxAsset,
   deferredTaxLiability,
   depreciationFromFA,
@@ -236,7 +237,7 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   line('  e)  Short-Term Provisions', shortTermProvisions, { note: 7 });
   line('Total Current Liabilities', totalCurrentLiab, { total: true });
   spacer();
-  line('  f)  Year-end Reconciliation  (auto-balance)', bsReconciliation, { muted: true });
+  line('  f)  Opening Balance Difference  (pre-existing / auto-balance)', bsReconciliation, { muted: true });
   spacer();
   line('TOTAL EQUITY & LIABILITIES', (b) => totalEquityLiabilities(b) + bsReconciliation(b), { grand: true });
   spacer();
@@ -384,7 +385,8 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   noteSheet(2, 'Reserves & Surplus', (s, rr) => {
     for (const l of ledgersFor(totalCol, 'Capital Account')) if (l.name.toLowerCase().includes('reserve')) rr = noteRow(s, rr, labelFor(l, multi), Math.round(l.closing));
     for (const l of ledgersFor(totalCol, 'Reserves & Surplus')) rr = noteRow(s, rr, labelFor(l, multi), Math.round(l.closing));
-    rr = noteRow(s, rr, 'Profit for the year (P&L A/c, cumulative)', Math.round(totalCol.pnlBalance));
+    rr = noteRow(s, rr, 'Retained earnings — opening (prior years)', Math.round(totalCol.pnlOpening));
+    rr = noteRow(s, rr, 'Profit for the year (transaction-derived)', Math.round(currentYearProfit(totalCol)));
     return rr;
   }, reservesSurplus(totalCol));
 
