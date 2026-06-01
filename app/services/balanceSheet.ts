@@ -114,6 +114,65 @@ export const inferStandardGroup = (primary: string, parents: Iterable<string>): 
   return null;
 };
 
+// Case-insensitive lookup from any Tally primary-group spelling to the canonical
+// standard key used by BS_MAP / the P&L set. Tally exports vary in case
+// ("Cash-in-Hand" vs "Cash-in-hand"), so we never match on exact case.
+const CANONICAL_BY_LOWER: Record<string, string> = {};
+for (const k of Object.keys(BS_MAP)) CANONICAL_BY_LOWER[k.toLowerCase()] = k;
+for (const k of PNL_PRIMARY_GROUPS) CANONICAL_BY_LOWER[k.toLowerCase()] = k;
+
+/** The special "drop this group from the statements" reclassification target. */
+export const EXCLUDE_TARGET = '(exclude)';
+
+/** Standard targets a user can map a primary group to, grouped for the picker. */
+export const STANDARD_PRIMARY_OPTIONS: Array<{ group: string; options: string[] }> = [
+  { group: 'Equity', options: ['Capital Account', 'Reserves & Surplus'] },
+  { group: 'Borrowings', options: ['Secured Loans', 'Unsecured Loans', 'Loans (Liability)', 'Bank OD A/c'] },
+  {
+    group: 'Current Liabilities',
+    options: ['Sundry Creditors', 'Duties & Taxes', 'Provisions', 'Current Liabilities', 'Branch / Divisions', 'Suspense A/c'],
+  },
+  {
+    group: 'Non-Current Assets',
+    options: ['Fixed Assets', 'Investments', 'Deposits (Asset)', 'Loans & Advances (Asset)', 'Misc. Expenses (ASSET)'],
+  },
+  {
+    group: 'Current Assets',
+    options: ['Stock-in-hand', 'Sundry Debtors', 'Cash-in-hand', 'Bank Accounts', 'Current Assets'],
+  },
+  {
+    group: 'Profit & Loss',
+    options: ['Sales Accounts', 'Direct Incomes', 'Indirect Incomes', 'Purchase Accounts', 'Direct Expenses', 'Indirect Expenses'],
+  },
+  { group: 'Other', options: [EXCLUDE_TARGET] },
+];
+
+export type ReclassifyMap = Record<string, string>; // key: rawPrimary.toLowerCase() -> standard primary
+
+export type PrimaryResolution =
+  | { primary: string; how: 'mapped' | 'inferred' | 'reclassified'; classified: true; bsOrPnl: 'bs' | 'pnl' }
+  | { primary: string; how: 'unmapped' | 'excluded'; classified: false; bsOrPnl: null };
+
+/** Resolve a raw Tally primary group to a standard key, honouring user overrides. */
+export const resolvePrimary = (
+  rawPrimary: string,
+  parents: Iterable<string>,
+  reclassify?: ReclassifyMap,
+): PrimaryResolution => {
+  const lk = rawPrimary.trim().toLowerCase();
+  const override = reclassify?.[lk];
+  if (override === EXCLUDE_TARGET) return { primary: rawPrimary, how: 'excluded', classified: false, bsOrPnl: null };
+  if (override) {
+    const canon = CANONICAL_BY_LOWER[override.toLowerCase()] || override;
+    return { primary: canon, how: 'reclassified', classified: true, bsOrPnl: canon in BS_MAP ? 'bs' : 'pnl' };
+  }
+  const direct = CANONICAL_BY_LOWER[lk];
+  if (direct) return { primary: direct, how: 'mapped', classified: true, bsOrPnl: direct in BS_MAP ? 'bs' : 'pnl' };
+  const inferred = inferStandardGroup(rawPrimary, parents);
+  if (inferred) return { primary: inferred, how: 'inferred', classified: true, bsOrPnl: inferred in BS_MAP ? 'bs' : 'pnl' };
+  return { primary: rawPrimary, how: 'unmapped', classified: false, bsOrPnl: null };
+};
+
 // ─── Data model ───────────────────────────────────────────────────────────────
 
 export interface BsLedger {
@@ -168,7 +227,11 @@ const ordinalDate = (iso: string): string => {
 
 // ─── Build one branch from a parsed TallyStore ─────────────────────────────────
 
-export const buildBranchFromStore = (store: TallyStore, branchName: string): BranchData => {
+export const buildBranchFromStore = (
+  store: TallyStore,
+  branchName: string,
+  reclassify?: ReclassifyMap,
+): BranchData => {
   // Voucher-driven closing balances are the double-entry ground truth:
   //   closing(ledger) = opening(ledger) + Σ amount where voucher is_accounting_voucher
   // This sums to ₹0 across the trial balance, unlike Tally's presentation-layer
@@ -211,11 +274,7 @@ export const buildBranchFromStore = (store: TallyStore, branchName: string): Bra
     const rawPrimary = (group?.primary_group || group?.name || '').trim();
     if (!rawPrimary) continue; // no resolvable group -> outside BS/P&L
 
-    let primary = rawPrimary;
-    if (!(primary in BS_MAP) && !PNL_PRIMARY_GROUPS.has(primary)) {
-      const inferred = inferStandardGroup(primary, rawPrimaryParents.get(rawPrimary) || []);
-      if (inferred) primary = inferred;
-    }
+    const res = resolvePrimary(rawPrimary, rawPrimaryParents.get(rawPrimary) || [], reclassify);
 
     const opening = safeNum(ledger.opening_balance);
     const mvKey = nameKey(name);
@@ -223,20 +282,22 @@ export const buildBranchFromStore = (store: TallyStore, branchName: string): Bra
       ? opening + (movements.get(mvKey) || 0)
       : safeNum(ledger.closing_balance);
 
-    const row: BsLedger = {
+    // Excluded groups are dropped from the statement entirely (absorbed by the plug).
+    if (res.how === 'excluded') continue;
+
+    ledgers.push({
       name,
       parent: (ledger.parent || '').trim(),
-      primary,
+      primary: res.primary,
       rawPrimary,
       opening,
       closing,
       isDeemedPositive: Boolean(group?.is_deemedpositive),
       branch: branchName,
-    };
-    ledgers.push(row);
+    });
 
     // A balance-sheet-natured ledger that still isn't classified is a balance risk.
-    if (!(primary in BS_MAP) && !PNL_PRIMARY_GROUPS.has(primary) && Math.abs(closing) > 0.5) {
+    if (!res.classified && Math.abs(closing) > 0.5) {
       unclassified.push({ name, rawPrimary, closing });
     }
   }
@@ -272,16 +333,66 @@ export const buildBranchFromStore = (store: TallyStore, branchName: string): Bra
   };
 };
 
+// ─── Primary-group catalogue (drives the mapping UI) ───────────────────────────
+
+export interface PrimaryGroupInfo {
+  rawPrimary: string;
+  count: number; // ledgers under this primary across all branches
+  closingSum: number; // indicative magnitude (sum of mst_ledger closing_balance)
+  branches: string[]; // which branches contain it
+  resolution: PrimaryResolution;
+}
+
+/**
+ * Enumerate every distinct Tally primary group across the given stores, with its
+ * current resolution under `reclassify`. Reads stores directly (not built
+ * BranchData) so excluded groups still appear and remain re-mappable.
+ */
+export const collectPrimaryGroups = (
+  stores: Array<{ store: TallyStore; branchName: string }>,
+  reclassify?: ReclassifyMap,
+): PrimaryGroupInfo[] => {
+  const agg = new Map<string, { count: number; closing: number; parents: Set<string>; branches: Set<string> }>();
+  for (const { store, branchName } of stores) {
+    for (const ledger of store.ledgers.values()) {
+      if (nameKey(ledger.name || '') === nameKey('Profit & Loss A/c')) continue;
+      const group = store.groups.get(nameKey(ledger.parent));
+      const rawPrimary = ((group?.primary_group || group?.name) || '').trim();
+      if (!rawPrimary) continue;
+      let a = agg.get(rawPrimary);
+      if (!a) {
+        a = { count: 0, closing: 0, parents: new Set(), branches: new Set() };
+        agg.set(rawPrimary, a);
+      }
+      a.count += 1;
+      a.closing += safeNum(ledger.closing_balance);
+      a.parents.add((ledger.parent || '').trim());
+      a.branches.add(branchName);
+    }
+  }
+  return Array.from(agg.entries())
+    .map(([rawPrimary, a]) => ({
+      rawPrimary,
+      count: a.count,
+      closingSum: a.closing,
+      branches: Array.from(a.branches),
+      resolution: resolvePrimary(rawPrimary, a.parents, reclassify),
+    }))
+    .sort((x, y) => Math.abs(y.closingSum) - Math.abs(x.closingSum));
+};
+
 // ─── Multi-branch consolidation ────────────────────────────────────────────────
 
 export const consolidateBranches = (branches: BranchData[]): BranchData => {
   if (branches.length === 0) throw new Error('No branches to consolidate.');
   if (branches.length === 1) return branches[0];
 
-  const sumOpt = (vals: Array<number | null>): number | null => {
-    const present = vals.filter((v): v is number => v !== null);
-    return present.length ? present.reduce((a, b) => a + b, 0) : null;
-  };
+  // Stock is non-linear: each branch may source it from a Stock-in-hand ledger
+  // OR the inventory module. Concatenating ledgers would let one branch's large
+  // stock ledger mask another's inventory-module stock. So consolidate stock by
+  // SUMMING each branch's already-resolved figure (pinned as an override).
+  const openingStockSum = branches.reduce((a, b) => a + openingStock(b), 0);
+  const closingStockSum = branches.reduce((a, b) => a + closingStock(b), 0);
 
   return {
     branchName: 'Consolidated',
@@ -293,8 +404,8 @@ export const consolidateBranches = (branches: BranchData[]): BranchData => {
     pnlBalance: branches.reduce((a, b) => a + b.pnlBalance, 0),
     pnlOpening: branches.reduce((a, b) => a + b.pnlOpening, 0),
     stockItems: branches.flatMap((b) => b.stockItems),
-    openingStockOverride: sumOpt(branches.map((b) => b.openingStockOverride)),
-    closingStockOverride: sumOpt(branches.map((b) => b.closingStockOverride)),
+    openingStockOverride: openingStockSum,
+    closingStockOverride: closingStockSum,
     unclassified: branches.flatMap((b) =>
       b.unclassified.map((u) => ({ ...u, name: `${u.name} (${b.branchName})` })),
     ),
@@ -316,8 +427,10 @@ const sumClosing = (b: BranchData, primary: string) =>
 const sumOpening = (b: BranchData, primary: string) =>
   ledgersFor(b, primary).reduce((s, l) => s + l.opening, 0);
 
+// Sum (not first-match) so multiple deferred-tax ledgers — e.g. across
+// consolidated branches — are all captured.
 const deferredTax = (b: BranchData): number =>
-  b.ledgers.find((l) => l.name.toLowerCase().includes('deferred tax'))?.closing ?? 0;
+  b.ledgers.filter((l) => l.name.toLowerCase().includes('deferred tax')).reduce((s, l) => s + l.closing, 0);
 
 // Inventory
 const stockItemsClosingTotal = (b: BranchData) =>
