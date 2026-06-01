@@ -4,11 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FinAnalyzer Pro</title>
-    <script>
-      // Enable Tailwind CDN dark mode class strategy
-      tailwind = { darkMode: 'class' };
-    </script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      // Dark mode MUST be class-based: the app toggles `.dark` on <html>.
+      // This config has to be set AFTER the CDN script loads — assigning it
+      // before is discarded when the CDN initialises window.tailwind, which
+      // then defaults to the `media` strategy and makes `dark:` text colours
+      // fire on a light background (invisible text) when the OS is in dark mode.
+      tailwind.config = { darkMode: 'class' };
+    </script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
       body { font-family: 'Inter', sans-serif; }
