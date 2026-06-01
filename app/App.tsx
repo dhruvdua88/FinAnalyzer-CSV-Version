@@ -42,7 +42,7 @@ import FileUpload from './components/FileUpload';
 import { LedgerEntry, AnalysisType, AuditSettings } from './types';
 import { clearSqlData, fetchRowsFromSql, isSqlBackendAvailable, loadRowsIntoSql, SqlLoadSummary } from './services/sqlDataService';
 import { TallyStore, TallyStoreProvider } from './services/tally';
-import { LayoutDashboard, Receipt, FileSpreadsheet, ArrowLeft, BarChart3, FileInput, Ban, TrendingUp, BookOpen, ShieldCheck, Settings2, PieChart, FileText, Landmark, Clock3, Users2, Menu, X, Wallet, FileSearch, AlertTriangle, ShieldAlert, Moon, Sun } from 'lucide-react';
+import { LayoutDashboard, Receipt, FileSpreadsheet, ArrowLeft, BarChart3, FileInput, Ban, TrendingUp, BookOpen, ShieldCheck, Settings2, PieChart, FileText, Landmark, Clock3, Users2, Menu, X, Wallet, FileSearch, AlertTriangle, ShieldAlert, Moon, Sun, Scale } from 'lucide-react';
 
 const GSTRateAnalysis = lazy(() => import('./components/modules/GSTRateAnalysis'));
 const SalesRegister = lazy(() => import('./components/modules/SalesRegister'));
@@ -64,6 +64,7 @@ const VoucherBookView = lazy(() => import('./components/modules/VoucherBookView'
 const LedgerVoucherView = lazy(() => import('./components/modules/LedgerVoucherView'));
 const CashFlowAnalysis = lazy(() => import('./components/modules/CashFlowAnalysis'));
 const ProfitLossAnalysis = lazy(() => import('./components/modules/ProfitLossAnalysis'));
+const BalanceSheetAnalysis = lazy(() => import('./components/modules/BalanceSheetAnalysis'));
 const ExceptionDensityHeatmapAnalytics = lazy(() => import('./components/modules/ExceptionDensityHeatmapAnalytics'));
 const BalanceSheetCleanlinessAnalytics = lazy(() => import('./components/modules/BalanceSheetCleanlinessAnalytics'));
 const ITC3BReconciliation = lazy(() => import('./components/modules/ITC3BReconciliation'));
@@ -85,6 +86,7 @@ const MODULE_LABELS: Record<AnalysisType, string> = {
   [AnalysisType.RCM_ANALYSIS]: 'Reverse Charge (RCM) Analysis',
   [AnalysisType.GST_EXPENSE_ANALYSIS]: 'Blocked Credit Analysis',
   [AnalysisType.PROFIT_LOSS_ANALYSIS]: 'Profit & Loss Analysis',
+  [AnalysisType.BALANCE_SHEET]: 'Balance Sheet (Schedule III)',
   [AnalysisType.CASH_FLOW_ANALYSIS]: 'Cash Flow Analysis',
   [AnalysisType.VARIANCE_ANALYSIS]: 'Month-on-Month Variance Analysis',
   [AnalysisType.EXCEPTION_DENSITY_HEATMAP]: 'Exception Density Heatmap Analytics',
@@ -115,6 +117,7 @@ const MODULE_ICONS: Record<AnalysisType, ModuleIcon> = {
   [AnalysisType.RCM_ANALYSIS]: FileInput,
   [AnalysisType.GST_EXPENSE_ANALYSIS]: Ban,
   [AnalysisType.PROFIT_LOSS_ANALYSIS]: FileText,
+  [AnalysisType.BALANCE_SHEET]: Scale,
   [AnalysisType.CASH_FLOW_ANALYSIS]: Wallet,
   [AnalysisType.VARIANCE_ANALYSIS]: TrendingUp,
   [AnalysisType.EXCEPTION_DENSITY_HEATMAP]: ShieldAlert,
@@ -145,6 +148,7 @@ const MODULE_SECTIONS: Array<{ id: string; title: string; description: string; m
       AnalysisType.PARTY_LEDGER_MATRIX,
       AnalysisType.RELATED_PARTY_ANALYSIS,
       AnalysisType.TRIAL_BALANCE,
+      AnalysisType.BALANCE_SHEET,
     ],
   },
   {
@@ -749,6 +753,7 @@ const App: React.FC = () => {
                 />
               )}
               {activeModule === AnalysisType.PROFIT_LOSS_ANALYSIS && <ProfitLossAnalysis data={transactionData} />}
+              {activeModule === AnalysisType.BALANCE_SHEET && <BalanceSheetAnalysis />}
               {activeModule === AnalysisType.CASH_FLOW_ANALYSIS && <CashFlowAnalysis data={transactionData} />}
               {activeModule === AnalysisType.VARIANCE_ANALYSIS && <VarianceAnalysis data={transactionData} />}
               {activeModule === AnalysisType.EXCEPTION_DENSITY_HEATMAP && (
