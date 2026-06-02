@@ -584,8 +584,8 @@ export const currentYearProfit = (b: BranchData): number => profitBeforeTax(b);
 
 // ─── Statement of Profit & Loss (uses ledger closing_balance, matches Tally) ────
 // Sub-groups of Indirect Expenses carved out on the face of the P&L.
-const FINANCE_COST_PARENTS = new Set(['Finance Costs', 'Finance Cost', 'Interest & Late Filing Fees']);
-const EMPLOYEE_COST_PARENTS = new Set([
+export const FINANCE_COST_PARENTS = new Set(['Finance Costs', 'Finance Cost', 'Interest & Late Filing Fees']);
+export const EMPLOYEE_COST_PARENTS = new Set([
   'Employee benefit expenses',
   'Contribution to Provident Funds & Others',
   'Salary',

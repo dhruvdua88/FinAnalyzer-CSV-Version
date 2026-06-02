@@ -66,6 +66,8 @@ import {
   taxExpense,
   bsReconciliation,
   BS_MAP,
+  FINANCE_COST_PARENTS,
+  EMPLOYEE_COST_PARENTS,
 } from './balanceSheet';
 import {
   ALIGN,
@@ -113,6 +115,14 @@ const noteSheetName = (n: number): string =>
     12: 'N12 Trade Receivables',
     13: 'N13 Cash & Bank',
     14: 'N14 Other CA',
+    15: 'N15 Revenue',
+    16: 'N16 Other Income',
+    17: 'N17 Purchases',
+    18: 'N18 Inventory Change',
+    19: 'N19 Employee Cost',
+    20: 'N20 Finance Costs',
+    21: 'N21 Depreciation',
+    22: 'N22 Other Expenses',
   }[n] || `Note ${n}`);
 
 const labelFor = (l: BsLedger, multi: boolean): string => (multi && l.branch ? `[${l.branch}] ${l.name}` : l.name);
@@ -328,12 +338,12 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   band(pl, `For the Year Ended ${input.periodLabel}`, subBandStyle(11));
   band(pl, unit, subBandStyle(11, true));
   pl.set(r, 0, 'Particulars', { s: columnHeaderStyle(ALIGN.left) });
-  pl.set(r, 1, '', { s: columnHeaderStyle(ALIGN.center), num: false });
+  pl.set(r, 1, 'Note', { s: columnHeaderStyle(ALIGN.center), num: false });
   columns.forEach((col, i) => pl.set(r, firstValCol + i, multi ? col.name : 'Current Year', { s: columnHeaderStyle(ALIGN.center), num: false }));
   const plHeaderRow = r;
   r++;
 
-  const plLine = (label: string, fn: Fn | null, opts: { bold?: boolean; total?: boolean; grand?: boolean; italic?: boolean } = {}) => {
+  const plLine = (label: string, fn: Fn | null, opts: { bold?: boolean; total?: boolean; grand?: boolean; italic?: boolean; note?: number } = {}) => {
     // Hide nil P&L line items (every column zero) — keep subtotals/totals/headers.
     if (fn && !opts.total && !opts.grand && columns.every((c) => Math.round(fn(c.data)) === 0)) return;
     const lblStyle = opts.grand
@@ -342,6 +352,13 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
       ? subtotalLabelStyle()
       : labelStyle({ bold: opts.bold, italic: opts.italic });
     pl.set(r, 0, label, { s: lblStyle, num: false });
+    if (opts.note) {
+      pl.set(r, 1, opts.note, {
+        s: linkStyle(ALIGN.center),
+        link: internalLink(noteSheetName(opts.note), 'A1', `Note ${opts.note}`),
+        num: true,
+      });
+    }
     if (fn) {
       columns.forEach((col, i) => {
         const numS = opts.grand
@@ -354,17 +371,17 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
     }
     r++;
   };
-  plLine('I.   Revenue from Operations', revenueFromOps, { bold: true });
-  plLine('II.  Other Income', otherIncome, { bold: true });
+  plLine('I.   Revenue from Operations', revenueFromOps, { bold: true, note: 15 });
+  plLine('II.  Other Income', otherIncome, { bold: true, note: 16 });
   plLine('III. Total Revenue (I + II)', totalRevenue, { total: true });
   spacer();
   plLine('IV.  Expenses', null, { bold: true });
-  plLine('     a)  Cost of Materials / Purchases', purchases);
-  plLine('     b)  Changes in Inventories', changesInInventories, { italic: true });
-  plLine('     c)  Employee Benefits Expense', employeeCosts);
-  plLine('     d)  Finance Costs', financeCosts);
-  plLine('     e)  Depreciation & Amortisation', depreciationFromFA);
-  plLine('     f)  Other Expenses', (b) => otherIndirectExpenses(b) + directExpenses(b));
+  plLine('     a)  Cost of Materials / Purchases', purchases, { note: 17 });
+  plLine('     b)  Changes in Inventories', changesInInventories, { italic: true, note: 18 });
+  plLine('     c)  Employee Benefits Expense', employeeCosts, { note: 19 });
+  plLine('     d)  Finance Costs', financeCosts, { note: 20 });
+  plLine('     e)  Depreciation & Amortisation', depreciationFromFA, { note: 21 });
+  plLine('     f)  Other Expenses', (b) => otherIndirectExpenses(b) + directExpenses(b), { note: 22 });
   plLine('     Total Expenses', totalExpenses, { total: true });
   spacer();
   plLine('V.   Profit Before Tax', profitBeforeTax, { total: true });
@@ -404,16 +421,20 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
     title: string,
     build: (s: Sheet, startRow: number) => number,
     total: number,
-    opts: { dense?: boolean; cols?: number } = {},
+    opts: { dense?: boolean; cols?: number; backTo?: 'bs' | 'pl'; skipIfNil?: boolean } = {},
   ) => {
+    // Skip emitting an empty schedule (and its orphan tab) when the line is nil.
+    if (opts.skipIfNil && Math.round(total) === 0) return;
     const s = new Sheet();
     const dataCols = opts.cols ?? 2; // label + 1 value column by default
     s.cols = [{ wch: 48 }, ...Array.from({ length: dataCols - 1 }, () => ({ wch: 20 }))];
     const wide = dataCols - 1;
     s.merge(0, 0, wide);
     s.set(0, 0, `Note ${num}:  ${title}`, { s: titleBandStyle(12), num: false });
-    // Nav links row.
-    s.set(1, 0, '← Back to Balance Sheet', { s: linkStyle(ALIGN.left), link: internalLink(BS_SHEET, 'A1', 'Balance Sheet'), num: false });
+    // Nav links row — point back to whichever statement carries this note.
+    const backSheet = opts.backTo === 'pl' ? PL_SHEET : BS_SHEET;
+    const backLabel = opts.backTo === 'pl' ? '← Back to Statement of P&L' : '← Back to Balance Sheet';
+    s.set(1, 0, backLabel, { s: linkStyle(ALIGN.left), link: internalLink(backSheet, 'A1', backSheet), num: false });
     s.set(1, 1, 'Index', { s: linkStyle(ALIGN.left), link: internalLink(INDEX_SHEET, 'A1', 'Notes Index'), num: false });
     const bodyStart = 2;
     let rr = build(s, bodyStart);
@@ -531,6 +552,68 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   }, cashAndBank(totalCol), { dense: true });
   noteSheet(14, 'Other Current Assets', (s, rr) => listLedgers(s, rr, ['Current Assets'], -1), otherCurrentAssets(totalCol), { dense: true });
 
+  // ───────────────────── P&L note schedules (N15..N22) ─────────────────────
+  // Expense ledgers carry a debit (negative) closing; income carries a credit
+  // (positive) closing. We negate expenses (sign -1) so each note shows the
+  // positive expense figure that appears on the face of the P&L.
+  const listIndirectByParent = (s: Sheet, startRow: number, pred: (parent: string) => boolean): number => {
+    let rr = startRow;
+    for (const l of ledgersFor(totalCol, 'Indirect Expenses')) {
+      if (pred(l.parent)) rr = noteRow(s, rr, labelFor(l, multi), Math.round(-l.closing));
+    }
+    return rr;
+  };
+
+  noteSheet(15, 'Revenue from Operations',
+    (s, rr) => listLedgers(s, rr, ['Sales Accounts', 'Direct Incomes'], 1, { groupByPrimary: true }),
+    revenueFromOps(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
+
+  noteSheet(16, 'Other Income',
+    (s, rr) => listLedgers(s, rr, ['Indirect Incomes'], 1),
+    otherIncome(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
+
+  noteSheet(17, 'Cost of Materials / Purchases',
+    (s, rr) => listLedgers(s, rr, ['Purchase Accounts'], -1, { groupByPrimary: true }),
+    purchases(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
+
+  noteSheet(18, 'Changes in Inventories',
+    (s, rr) => {
+      rr = noteRow(s, rr, 'Opening Inventory', Math.round(openingStockSafe(totalCol)));
+      rr = noteRow(s, rr, 'Less: Closing Inventory', Math.round(-closingStock(totalCol)));
+      return rr;
+    },
+    changesInInventories(totalCol), { backTo: 'pl', skipIfNil: true });
+
+  noteSheet(19, 'Employee Benefits Expense',
+    (s, rr) => listIndirectByParent(s, rr, (p) => EMPLOYEE_COST_PARENTS.has(p)),
+    employeeCosts(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
+
+  noteSheet(20, 'Finance Costs',
+    (s, rr) => listIndirectByParent(s, rr, (p) => FINANCE_COST_PARENTS.has(p)),
+    financeCosts(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
+
+  noteSheet(21, 'Depreciation & Amortisation',
+    (s, rr) => {
+      for (const row of fixedAssetsSchedule(totalCol)) rr = noteRow(s, rr, row.name, Math.round(row.deprCharge));
+      return rr;
+    },
+    depreciationFromFA(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
+
+  noteSheet(22, 'Other Expenses',
+    (s, rr) => {
+      const hasIndirect = ledgersFor(totalCol, 'Indirect Expenses').some(
+        (l) => !FINANCE_COST_PARENTS.has(l.parent) && !EMPLOYEE_COST_PARENTS.has(l.parent) && Math.round(l.closing) !== 0,
+      );
+      const hasDirect = ledgersFor(totalCol, 'Direct Expenses').some((l) => Math.round(l.closing) !== 0);
+      const split = hasIndirect && hasDirect;
+      if (split) rr = noteRow(s, rr, 'Other Indirect Expenses', null, { bold: true });
+      rr = listIndirectByParent(s, rr, (p) => !FINANCE_COST_PARENTS.has(p) && !EMPLOYEE_COST_PARENTS.has(p));
+      if (split) rr = noteRow(s, rr, 'Direct Expenses', null, { bold: true });
+      rr = listLedgers(s, rr, ['Direct Expenses'], -1);
+      return rr;
+    },
+    otherIndirectExpenses(totalCol) + directExpenses(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
+
   // ───────────────────────── Notes Index ─────────────────────────
   const idx = new Sheet();
   idx.cols = [{ wch: 8 }, { wch: 40 }, { wch: 22 }];
@@ -542,7 +625,18 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   idx.set(1, 2, 'Statement of P&L', { s: linkStyle(ALIGN.left), link: internalLink(PL_SHEET, 'A1'), num: false });
   ['Note', 'Particulars', `Amount ${unit}`].forEach((h, c) => idx.set(2, c, h, { s: columnHeaderStyle(c === 2 ? ALIGN.right : ALIGN.left), num: false }));
   let ir = 3;
+  const idxSection = (text: string) => {
+    idx.merge(ir, 0, 2);
+    idx.set(ir, 0, text, { s: sectionHeaderStyle(), num: false });
+    ir++;
+  };
+  let lastWasBs = false;
   for (const [num, title, amt] of noteIndex) {
+    if (num <= 14 && !lastWasBs) {
+      idxSection('Balance Sheet Notes');
+      lastWasBs = true;
+    }
+    if (num === 15) idxSection('Profit & Loss Notes');
     idx.set(ir, 0, num, { s: linkStyle(ALIGN.center), link: internalLink(noteSheetName(num), 'A1', `Note ${num}`), num: true });
     idx.set(ir, 1, title, { s: labelStyle(), num: false });
     idx.set(ir, 2, Math.round(amt), { s: numberStyle(Z), num: true });
