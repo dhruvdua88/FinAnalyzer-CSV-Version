@@ -317,7 +317,7 @@ export const buildBranchFromStore = (
     .trim();
   const periodTo = store.meta?.periodTo || '';
 
-  return {
+  const branch: BranchData = {
     branchName,
     company,
     periodFrom: store.meta?.periodFrom || '',
@@ -331,6 +331,33 @@ export const buildBranchFromStore = (
     closingStockOverride: null,
     unclassified,
   };
+
+  resolveOpeningStockSource(branch);
+  return branch;
+};
+
+// Opening-stock source self-correction.
+// Tally's Stock-in-Hand ledger opening_balance (the trial-balance figure) can be
+// stale relative to the stock register's opening_value. When the rest of the
+// opening trial balance only ties to zero if opening stock equals the register
+// figure, the ledger opening leaves a one-sided opening difference (the plug).
+// So: try the register opening; keep it ONLY if it strictly shrinks the
+// auto-balance plug, otherwise fall back to the ledger (trial-balance) opening.
+// Closing stock is never touched here.
+const resolveOpeningStockSource = (b: BranchData): void => {
+  if (b.stockItems.length === 0) return;
+  const ledgerOpen = -sumOpening(b, 'Stock-in-hand');
+  const registerOpen = stockItemsOpeningTotal(b);
+  if (Math.abs(registerOpen - ledgerOpen) < 0.5) return; // same source — nothing to decide
+
+  b.openingStockOverride = ledgerOpen;
+  const plugLedger = Math.abs(bsReconciliation(b));
+  b.openingStockOverride = registerOpen;
+  const plugRegister = Math.abs(bsReconciliation(b));
+
+  // Register wins only when it brings the BS materially closer to balancing;
+  // null restores the default ledger-first resolution in openingStock().
+  b.openingStockOverride = plugRegister < plugLedger - 0.5 ? registerOpen : null;
 };
 
 // ─── Primary-group catalogue (drives the mapping UI) ───────────────────────────
