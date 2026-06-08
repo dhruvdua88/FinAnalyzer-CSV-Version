@@ -176,6 +176,9 @@ export interface ItcQueryOpts {
   dateFrom?: string;        // ISO, inclusive
   dateTo?: string;          // ISO, inclusive
   gstInputLedgers?: string[];  // extra ledger names to treat as GST input (supplements auto-detection)
+  gstLedgerOverride?: string[]; // authoritative GST-input set — when present, EXACTLY these
+                                // ledgers are treated as input GST (auto-detection ignored).
+                                // Lets the UI both add missed ledgers and exclude auto-picked ones.
 }
 
 // ── Per-line annotation ────────────────────────────────────────────────────
@@ -196,7 +199,7 @@ interface AnnotatedLine {
   gstType: 'IGST' | 'CGST' | 'SGST' | 'OTHER_GST' | null;
 }
 
-const annotateLines = (store: TallyStore, extraGstNames?: Set<string>): AnnotatedLine[] => {
+const annotateLines = (store: TallyStore, extraGstNames?: Set<string>, overrideSet?: Set<string>): AnnotatedLine[] => {
   const out: AnnotatedLine[] = [];
   for (const line of store.accountingLines) {
     const ledger = store.ledger(line.ledger);
@@ -209,7 +212,12 @@ const annotateLines = (store: TallyStore, extraGstNames?: Set<string>): Annotate
       });
       continue;
     }
-    const isGst = isInputGstLedger(ledger) || (extraGstNames != null && extraGstNames.has(nameKey(ledger.name)));
+    // When the UI supplies an explicit override set, it is authoritative —
+    // a ledger counts as input GST iff it's in that set. Otherwise fall back
+    // to auto-detection plus any extra ledgers the user added.
+    const isGst = overrideSet
+      ? overrideSet.has(nameKey(ledger.name))
+      : (isInputGstLedger(ledger) || (extraGstNames != null && extraGstNames.has(nameKey(ledger.name))));
     const isRcm = isGst && isRcmLedger(ledger.name);
     const isRcmPayable = isRcm && isRcmPayableLedger(ledger.name);
     const gstType = isGst ? classifyGstType(ledger.name, ledger.gst_duty_head) : null;
@@ -234,15 +242,22 @@ const annotateLines = (store: TallyStore, extraGstNames?: Set<string>): Annotate
   return out;
 };
 
+// Resolve annotated lines honouring the query's GST-ledger options (explicit
+// override wins; else auto-detection + extra-added ledgers).
+const annotateFor = (store: TallyStore, opts: ItcQueryOpts): AnnotatedLine[] => {
+  const extra = opts.gstInputLedgers?.length ? new Set(opts.gstInputLedgers.map(nameKey)) : undefined;
+  const override = opts.gstLedgerOverride?.length ? new Set(opts.gstLedgerOverride.map(nameKey)) : undefined;
+  return annotateLines(store, extra, override);
+};
+
 // ── Main query ──────────────────────────────────────────────────────────────
 
 export const getPurchaseITCRegister = (
   store: TallyStore,
   opts: ItcQueryOpts = {},
 ): ItcRow[] => {
-  const { dateFrom, dateTo, gstInputLedgers } = opts;
-  const extraGstNames = gstInputLedgers?.length ? new Set(gstInputLedgers.map(nameKey)) : undefined;
-  const annotated = annotateLines(store, extraGstNames);
+  const { dateFrom, dateTo } = opts;
+  const annotated = annotateFor(store, opts);
 
   // Group annotated lines by voucher guid for O(1) lookup
   const linesByGuid = new Map<string, AnnotatedLine[]>();
@@ -460,9 +475,8 @@ export interface GlControlRow {
 }
 
 export const buildGLControl = (store: TallyStore, opts: ItcQueryOpts = {}): GlControlRow[] => {
-  const { dateFrom, dateTo, gstInputLedgers } = opts;
-  const extraGstNames = gstInputLedgers?.length ? new Set(gstInputLedgers.map(nameKey)) : undefined;
-  const annotated = annotateLines(store, extraGstNames);
+  const { dateFrom, dateTo } = opts;
+  const annotated = annotateFor(store, opts);
   const linesByGuid = new Map<string, AnnotatedLine[]>();
   for (const a of annotated) {
     const list = linesByGuid.get(a.guid); if (list) list.push(a); else linesByGuid.set(a.guid, [a]);
@@ -589,9 +603,8 @@ export interface OrphanGstRow {
 }
 
 export const buildOrphanGST = (store: TallyStore, opts: ItcQueryOpts = {}): OrphanGstRow[] => {
-  const { dateFrom, dateTo, gstInputLedgers } = opts;
-  const extraGstNames = gstInputLedgers?.length ? new Set(gstInputLedgers.map(nameKey)) : undefined;
-  const annotated = annotateLines(store, extraGstNames);
+  const { dateFrom, dateTo } = opts;
+  const annotated = annotateFor(store, opts);
   const linesByGuid = new Map<string, AnnotatedLine[]>();
   for (const a of annotated) {
     const list = linesByGuid.get(a.guid); if (list) list.push(a); else linesByGuid.set(a.guid, [a]);
@@ -762,6 +775,164 @@ export const buildLedgerAudit = (store: TallyStore, opts: ItcQueryOpts = {}): Le
   });
 
   return out;
+};
+
+// ── Available periods ─────────────────────────────────────────────────────────
+//
+// Distinct YYYY-MM months present in the store's vouchers, in chronological
+// (= fiscal, Apr→Mar) order. Drives the in-app period dropdown.
+
+export interface PeriodOption {
+  key: string;    // 'YYYY-MM'
+  label: string;  // 'April 2025'
+  from: string;   // 'YYYY-MM-01'
+  to: string;     // 'YYYY-MM-<last>'
+}
+
+export const availablePeriods = (store: TallyStore): PeriodOption[] => {
+  const set = new Set<string>();
+  for (const v of store.vouchers.values()) {
+    if (v.date && v.date.length >= 7) set.add(v.date.slice(0, 7));
+  }
+  return [...set].sort().map((k) => {
+    const y = Number(k.slice(0, 4));
+    const m = Number(k.slice(5, 7));
+    const last = new Date(y, m, 0).getDate();
+    return { key: k, label: `${MONTH_NAMES[m - 1]} ${y}`, from: `${k}-01`, to: `${k}-${String(last).padStart(2, '0')}` };
+  });
+};
+
+// ── Input-GST ledger movement / reconciliation ────────────────────────────────
+//
+// The ITC register only captures GST from EXPENSE vouchers. The same input-GST
+// ledgers (IGST/CGST/SGST/RCM-input) also move through payments, set-offs,
+// journals and ITC reversals. This view shows, per input ledger, the full
+// Opening → movement → Closing reconciliation, splitting movement into the part
+// captured in the ITC register vs. everything else — plus a tagged line-level
+// detail of every voucher that touched an input ledger.
+//
+// Balances are shown Debit-positive (input GST is an asset). Tally stores debit
+// balances as negative, so the display value is the negated signed balance.
+
+export interface LedgerMovementSummary {
+  ledgerName: string;
+  component: '' | 'IGST' | 'CGST' | 'SGST' | 'OTHER_GST';
+  isRcm: boolean;
+  opening: number;        // Dr-positive
+  itcDr: number; itcCr: number;       // movement via ITC-register (expense) vouchers
+  otherDr: number; otherCr: number;   // movement via payment/journal/adjustment vouchers
+  totalDr: number; totalCr: number;
+  closing: number;        // computed Dr-positive (opening + movement)
+  closingBooks: number;   // ledger's stored closing (Dr-positive) — exact only for full period
+  recoDelta: number;      // closing − closingBooks
+  isTotal: boolean;
+}
+
+export interface LedgerMovementLine {
+  ledgerName: string;
+  component: string;
+  date: string;
+  voucherType: string;
+  voucherNumber: string;
+  party: string;
+  debit: number;
+  credit: number;
+  bucket: 'ITC' | 'Other';
+  narration: string;
+}
+
+export interface InputLedgerMovement {
+  summary: LedgerMovementSummary[];
+  lines: LedgerMovementLine[];
+  fullPeriod: boolean;    // no date filter → the closingBooks reconciliation is exact
+}
+
+export const buildInputLedgerMovement = (store: TallyStore, opts: ItcQueryOpts = {}): InputLedgerMovement => {
+  const { dateFrom, dateTo } = opts;
+  const annotated = annotateFor(store, opts);
+
+  // Eligible ITC vouchers = accounting voucher, in-window, with an expense line.
+  const linesByGuid = new Map<string, AnnotatedLine[]>();
+  for (const a of annotated) { const l = linesByGuid.get(a.guid); if (l) l.push(a); else linesByGuid.set(a.guid, [a]); }
+  const eligibleGuids = new Set<string>();
+  for (const v of store.vouchers.values()) {
+    if (!v.is_accounting_voucher) continue;
+    if (dateFrom && v.date && v.date < dateFrom) continue;
+    if (dateTo && v.date && v.date > dateTo) continue;
+    const ls = linesByGuid.get(v.guid);
+    if (ls && ls.some((l) => l.primary != null)) eligibleGuids.add(v.guid);
+  }
+
+  interface Acc {
+    component: AnnotatedLine['gstType']; isRcm: boolean;
+    preSigned: number; periodSigned: number;
+    itcDr: number; itcCr: number; otherDr: number; otherCr: number;
+  }
+  const acc = new Map<string, Acc>();
+  const lines: LedgerMovementLine[] = [];
+
+  for (const a of annotated) {
+    if (!a.isGst || a.isRcmPayable) continue;   // input ledgers only (drop RCM payable liability)
+    const led = store.ledger(a.ledger);
+    const ledgerName = led?.name || a.ledger;
+    const v = store.vouchers.get(a.guid);
+    const vdate = v?.date || '';
+
+    let e = acc.get(ledgerName);
+    if (!e) { e = { component: a.gstType, isRcm: false, preSigned: 0, periodSigned: 0, itcDr: 0, itcCr: 0, otherDr: 0, otherCr: 0 }; acc.set(ledgerName, e); }
+    if (a.gstType && (!e.component || e.component === 'OTHER_GST')) e.component = a.gstType;
+    if (a.isRcm) e.isRcm = true;
+
+    if (dateFrom && vdate && vdate < dateFrom) { e.preSigned += a.amount; continue; } // pre-window → opening
+    if (dateTo && vdate && vdate > dateTo) continue;                                   // after window → ignore
+
+    e.periodSigned += a.amount;
+    const dr = a.amount < 0 ? -a.amount : 0;
+    const cr = a.amount > 0 ? a.amount : 0;
+    const isItc = eligibleGuids.has(a.guid);
+    if (isItc) { e.itcDr += dr; e.itcCr += cr; } else { e.otherDr += dr; e.otherCr += cr; }
+
+    lines.push({
+      ledgerName, component: a.gstType || '',
+      date: vdate, voucherType: v?.voucher_type || '', voucherNumber: v?.voucher_number || '',
+      party: v?.party_name || '',
+      debit: Math.round(dr * 100) / 100, credit: Math.round(cr * 100) / 100,
+      bucket: isItc ? 'ITC' : 'Other', narration: v?.narration || '',
+    });
+  }
+
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const summary: LedgerMovementSummary[] = [];
+  let tOpen = 0, tItcDr = 0, tItcCr = 0, tOthDr = 0, tOthCr = 0, tClose = 0, tBooks = 0;
+
+  for (const name of [...acc.keys()].sort((a, b) => a.localeCompare(b))) {
+    const e = acc.get(name)!;
+    const led = store.ledger(name);
+    const openSigned = (led?.opening_balance || 0) + e.preSigned;
+    const closeSigned = openSigned + e.periodSigned;
+    const openDisp = -openSigned;
+    const closeDisp = -closeSigned;
+    const closeBooksDisp = -(led?.closing_balance || 0);
+    summary.push({
+      ledgerName: name, component: e.component || '', isRcm: e.isRcm,
+      opening: r2(openDisp), itcDr: r2(e.itcDr), itcCr: r2(e.itcCr),
+      otherDr: r2(e.otherDr), otherCr: r2(e.otherCr),
+      totalDr: r2(e.itcDr + e.otherDr), totalCr: r2(e.itcCr + e.otherCr),
+      closing: r2(closeDisp), closingBooks: r2(closeBooksDisp),
+      recoDelta: r2(closeDisp - closeBooksDisp), isTotal: false,
+    });
+    tOpen += openDisp; tItcDr += e.itcDr; tItcCr += e.itcCr; tOthDr += e.otherDr; tOthCr += e.otherCr;
+    tClose += closeDisp; tBooks += closeBooksDisp;
+  }
+  if (summary.length) summary.push({
+    ledgerName: 'TOTAL', component: '', isRcm: false,
+    opening: r2(tOpen), itcDr: r2(tItcDr), itcCr: r2(tItcCr), otherDr: r2(tOthDr), otherCr: r2(tOthCr),
+    totalDr: r2(tItcDr + tOthDr), totalCr: r2(tItcCr + tOthCr),
+    closing: r2(tClose), closingBooks: r2(tBooks), recoDelta: r2(tClose - tBooks), isTotal: true,
+  });
+
+  lines.sort((a, b) => (a.ledgerName !== b.ledgerName ? a.ledgerName.localeCompare(b.ledgerName) : a.date.localeCompare(b.date)));
+  return { summary, lines, fullPeriod: !dateFrom && !dateTo };
 };
 
 // Date range helper for components that have a month-filtered LedgerEntry[]

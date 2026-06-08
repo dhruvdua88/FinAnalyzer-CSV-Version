@@ -12,7 +12,7 @@
 
 **One-click import from Tally → Run 24 specialized audit modules → Export audit-ready Excel working papers. 100% local. Zero telemetry. No cloud.**
 
-[⬇️ Download Now](#download) · [Quick Start (5 min)](#quick-start-no-coding-required) · [All 24 Modules](#all-24-modules) · [Developer Setup](#developer-setup)
+[⬇️ Download Now](#download) · [Try It in Your Browser](#try-it-in-your-browser) · [Quick Start (5 min)](#quick-start-no-coding-required) · [All 24 Modules](#all-24-modules) · [Developer Setup](#developer-setup)
 
 ---
 
@@ -38,6 +38,18 @@
 **macOS:** Unzip → right-click `Run FinAnalyzer.command` → **Open** (first time only, to bypass Gatekeeper)
 
 > Keep the `app/` folder next to the executable — it contains the interface and is required at runtime.
+
+---
+
+## Try It in Your Browser
+
+No install, no Node.js — a static web build runs the same React modules entirely client-side:
+
+**→ <https://dhruvdua88.github.io/FinAnalyzer-CSV-Version/>**
+
+Import a **Tally Export ZIP** (the `tally-database-loader` CSV/XLSX export) or a `.TSF` file, then run any module that works from imported data — Purchase Register, Balance Sheet, GSTR-2B Reconciliation, and more. Your data never leaves the browser tab; nothing is uploaded.
+
+> The browser build has **no live-Tally connection** and **no SQL low-memory mode** — those need the desktop backend. For day-to-day audit work on large companies, use the desktop download above.
 
 ---
 
@@ -75,7 +87,7 @@ Tally is the most-used accounting software in India. But it has no audit layer. 
 | **Ageing** | Creditor Ageing (FIFO) | True FIFO bucket ageing for payables |
 | **GST & Tax** | GST Rate Analysis | Validate GST rates on sales ledgers against expected category |
 | **GST & Tax** | Sales Register | Invoice-level sales detail with HSN, GST rate, party GSTIN |
-| **GST & Tax** | Purchase GST Register | Purchase-level detail with RCM flag, eligible ITC, blocked credit |
+| **GST & Tax** | Purchase GST Register | 6-sheet ITC register — ITC schedule, GSTR-3B summary, GL control, orphan-GST and ledger-audit checks (B2B / RCM-UR / import of services) |
 | **GST & Tax** | **GSTR-2B Reconciliation** ⭐ | Upload portal JSON → matched / unmatched / rate-mismatch buckets |
 | **GST & Tax** | ITC vs 3B Reconciliation | Books ITC vs GSTR-3B filed — row by row comparison |
 | **GST & Tax** | GST Ledger Summary | Ledger-wise GST constitution (CGST / SGST / IGST / Cess) |
@@ -148,6 +160,7 @@ app/
 | Method | When to use |
 |---|---|
 | **Import from Tally** | Tally is open on the same machine (or LAN) — fastest |
+| **Import Tally Export (ZIP)** | You have the `tally-database-loader` CSV/XLSX export ZIP — required by Purchase Register, Balance Sheet, and other relational modules |
 | **Import TSF file** | A colleague already exported a `.TSF` — just upload it |
 | **TSF Raw to Excel** | You only want flat CSV sheets, no analysis |
 

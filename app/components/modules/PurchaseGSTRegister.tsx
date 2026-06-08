@@ -20,6 +20,8 @@ import {
   buildGLControl,
   buildOrphanGST,
   buildLedgerAudit,
+  availablePeriods,
+  buildInputLedgerMovement,
   useTallyStore,
   type ItcRow,
   type ItcType,
@@ -59,28 +61,52 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
   const [activeIssue, setActiveIssue] = useState<null | 'rcm' | 'cgstSgst' | 'gstin' | 'noInv'>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [showLedgerPicker, setShowLedgerPicker] = useState(false);
-  const [extraGstLedgers, setExtraGstLedgers] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem('finanalyzer_itc_extra_gst') || '[]'); } catch { return []; }
+  const [ledgerSearch, setLedgerSearch] = useState('');
+
+  // Period: 'ALL' = whole file, else a 'YYYY-MM' key. Default to the imported
+  // month if the upload was a single month, otherwise the whole file.
+  const importRange = useMemo(() => dateRangeOf(data), [data]);
+  const [period, setPeriod] = useState<string>(() => {
+    const { dateFrom: f, dateTo: t } = importRange;
+    return f && t && f.slice(0, 7) === t.slice(0, 7) ? f.slice(0, 7) : 'ALL';
   });
 
+  // GST-input ledger selection. null = follow auto-detection; an array = the
+  // user's explicit set (can add missed ledgers AND exclude auto-picked ones).
+  const [gstSelection, setGstSelection] = useState<string[] | null>(() => {
+    try { const v = localStorage.getItem('finanalyzer_itc_gst_sel'); return v ? JSON.parse(v) : null; } catch { return null; }
+  });
   useEffect(() => {
-    localStorage.setItem('finanalyzer_itc_extra_gst', JSON.stringify(extraGstLedgers));
-  }, [extraGstLedgers]);
+    if (gstSelection === null) localStorage.removeItem('finanalyzer_itc_gst_sel');
+    else localStorage.setItem('finanalyzer_itc_gst_sel', JSON.stringify(gstSelection));
+  }, [gstSelection]);
 
-  // The query operates on the store's full date span by default; we narrow
-  // it to the months the user selected at import time so the on-screen view
-  // matches the rest of the app.
-  const { dateFrom, dateTo } = useMemo(() => dateRangeOf(data), [data]);
+  const periods = useMemo(() => (store ? availablePeriods(store) : []), [store]);
 
-  const potentialMissLedgers = useMemo(() => {
-    if (!store) return [];
-    return buildLedgerAudit(store).filter((r) => r.category === 'Potential Miss');
-  }, [store]);
+  const { dateFrom, dateTo } = useMemo<{ dateFrom?: string; dateTo?: string }>(() => {
+    if (period === 'ALL') return {};
+    const p = periods.find((x) => x.key === period);
+    return { dateFrom: p?.from, dateTo: p?.to };
+  }, [period, periods]);
+
+  // Universe of GST-relevant ledgers shown in the picker, with auto-status.
+  const candidates = useMemo(
+    () => (store ? buildLedgerAudit(store, { dateFrom, dateTo }) : []),
+    [store, dateFrom, dateTo],
+  );
+  const autoSelected = useMemo(
+    () => candidates.filter((c) => c.category === 'Selected').map((c) => c.ledgerName),
+    [candidates],
+  );
+  // Effective checked set for the picker UI.
+  const selectedSet = useMemo(() => new Set(gstSelection ?? autoSelected), [gstSelection, autoSelected]);
+  // Authoritative override passed to the queries (undefined while following auto).
+  const gstLedgerOverride = gstSelection ?? undefined;
 
   const allRows = useMemo<ItcRow[]>(() => {
     if (!store) return [];
-    return getPurchaseITCRegister(store, { dateFrom, dateTo, gstInputLedgers: extraGstLedgers });
-  }, [store, dateFrom, dateTo, extraGstLedgers]);
+    return getPurchaseITCRegister(store, { dateFrom, dateTo, gstLedgerOverride });
+  }, [store, dateFrom, dateTo, gstLedgerOverride]);
 
   const issues = useMemo(() => deriveItcIssues(allRows), [allRows]);
 
@@ -367,7 +393,7 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
       XLSX.utils.book_append_sheet(wb, wsSum, 'ITC Summary');
 
       // ── Sheet 3: GL Control (with notes block) ────────────────────────────
-      const glRows = buildGLControl(store, { dateFrom, dateTo, gstInputLedgers: extraGstLedgers });
+      const glRows = buildGLControl(store, { dateFrom, dateTo, gstLedgerOverride });
       const GL_HDRS = [
         'Primary Group', 'GL: # Vouchers', 'GL: Taxable Value',
         'ITC: # Vouchers', 'ITC: Taxable Value',
@@ -430,7 +456,7 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
       XLSX.utils.book_append_sheet(wb, wsGL, 'GL Control');
 
       // ── Sheet 4: Orphan GST ───────────────────────────────────────────────
-      const orphanRows = buildOrphanGST(store, { dateFrom, dateTo, gstInputLedgers: extraGstLedgers });
+      const orphanRows = buildOrphanGST(store, { dateFrom, dateTo, gstLedgerOverride });
       if (orphanRows.length === 0) {
         const wsO: Record<string, unknown> = {};
         wsO[ref({ r: 0, c: 0 })] = C0('No orphan GST vouchers found. ✓', { font: font(true, '2E7D32') });
@@ -540,6 +566,74 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
       wsInfo['!cols'] = [{ wch: 28 }, { wch: 80 }];
       XLSX.utils.book_append_sheet(wb, wsInfo, 'Info');
 
+      // ── Sheet 7: GST Input Ledger Movement ────────────────────────────────
+      const mov = buildInputLedgerMovement(store, { dateFrom, dateTo, gstLedgerOverride });
+      const wsMov: Record<string, unknown> = {};
+      let MR = 0;
+      const movMerges: Merge[] = [];
+      wsMov[ref({ r: MR, c: 0 })] = titleCell(`GST Input Ledger Movement  |  ${company}${filterDesc}`);
+      movMerges.push({ s: { r: MR, c: 0 }, e: { r: MR, c: 12 } }); MR++;
+      wsMov[ref({ r: MR, c: 0 })] = bannerCell(`Period: ${displayPeriod}   |   Balances are Debit-positive (input GST = asset). "ITC" = movement captured in the ITC register (expense vouchers); "Other" = payments / journals / set-offs / ITC reversals.`);
+      movMerges.push({ s: { r: MR, c: 0 }, e: { r: MR, c: 12 } }); MR += 2;
+
+      // Section A — per-ledger reconciliation
+      const SUMH = ['Ledger', 'Component', 'RCM?', 'Opening (Dr)', 'ITC Dr', 'ITC Cr', 'Other Dr', 'Other Cr', 'Total Dr', 'Total Cr', 'Closing (Dr)', 'Books Closing', 'Δ vs Books'];
+      const SUM_AMT = new Set(['Opening (Dr)', 'ITC Dr', 'ITC Cr', 'Other Dr', 'Other Cr', 'Total Dr', 'Total Cr', 'Closing (Dr)', 'Books Closing', 'Δ vs Books']);
+      const movSumHdrRow = MR;
+      for (let c = 0; c < SUMH.length; c++) wsMov[ref({ r: MR, c })] = C0(SUMH[c], hdrStyle);
+      MR++;
+      for (const s of mov.summary) {
+        const grand = s.isTotal;
+        const even = (MR % 2) === 0;
+        const vals: Array<string | number> = [
+          s.ledgerName, s.component, s.isRcm ? 'Y' : '',
+          s.opening, s.itcDr, s.itcCr, s.otherDr, s.otherCr, s.totalDr, s.totalCr, s.closing,
+          mov.fullPeriod ? s.closingBooks : '—',
+          mov.fullPeriod ? s.recoDelta : '—',
+        ];
+        for (let c = 0; c < SUMH.length; c++) {
+          const isComma = SUM_AMT.has(SUMH[c]) && typeof vals[c] === 'number';
+          wsMov[ref({ r: MR, c })] = dataCell(vals[c], { num: isComma, comma: isComma, grand, alt: !grand && even });
+        }
+        MR++;
+      }
+      if (mov.fullPeriod) {
+        const note = "Δ vs Books can be non-zero for GST duty ledgers — Tally squares off GST internally and the export's line-level detail for duty ledgers is partial. The ITC Dr column ties to the ITC register total tax.";
+        wsMov[ref({ r: MR + 1, c: 0 })] = C0(note, { font: { name: 'Calibri', sz: 9, italic: true, color: { rgb: '7B1010' } } });
+        movMerges.push({ s: { r: MR + 1, c: 0 }, e: { r: MR + 1, c: 12 } });
+        MR += 3;
+      } else {
+        MR += 1;
+      }
+
+      // Section B — voucher-level detail (ITC + non-ITC, tagged)
+      wsMov[ref({ r: MR, c: 0 })] = C0('Voucher-level detail — every voucher touching an input ledger (ITC = captured in register, Other = payment / journal / adjustment)', { font: font(true, C.TITLE_FG, 12) });
+      movMerges.push({ s: { r: MR, c: 0 }, e: { r: MR, c: 9 } }); MR += 2;
+      const DETH = ['Date', 'Voucher Type', 'Voucher No', 'Ledger', 'Component', 'Party', 'Debit', 'Credit', 'Bucket', 'Narration'];
+      const DET_AMT = DETH.map((h) => h === 'Debit' || h === 'Credit');
+      const DET_DATE = DETH.map((h) => h === 'Date');
+      const movDetHdrRow = MR;
+      for (let c = 0; c < DETH.length; c++) wsMov[ref({ r: MR, c })] = C0(DETH[c], hdrStyle);
+      MR++;
+      for (const l of mov.lines) {
+        const even = (MR % 2) === 0;
+        const fill = l.bucket === 'Other' ? C.ORANGE : undefined;
+        const vals: Array<string | number> = [
+          dMmmY(l.date), l.voucherType, l.voucherNumber, l.ledgerName, l.component, l.party,
+          l.debit, l.credit, l.bucket, l.narration,
+        ];
+        for (let c = 0; c < DETH.length; c++) {
+          wsMov[ref({ r: MR, c })] = dataCell(vals[c], { num: DET_AMT[c], comma: DET_AMT[c], date: DET_DATE[c], alt: even, fill });
+        }
+        MR++;
+      }
+      setRange(wsMov, MR, SUMH.length);
+      wsMov['!cols'] = [34, 12, 7, 16, 12, 12, 14, 14, 14, 14, 16, 16, 14].map((w) => ({ wch: w }));
+      wsMov['!merges'] = movMerges;
+      wsMov['!freeze'] = { xSplit: 0, ySplit: movSumHdrRow + 1 };
+      wsMov['!autofilter'] = { ref: range({ s: { r: movDetHdrRow, c: 0 }, e: { r: movDetHdrRow, c: DETH.length - 1 } }) };
+      XLSX.utils.book_append_sheet(wb, wsMov, 'Input Ledger Movement');
+
       XLSX.writeFile(wb, `Purchase_Register_ITC_${stamp}.xlsx`, { compression: true });
     } finally {
       setIsExporting(false);
@@ -622,6 +716,17 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
             className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
           />
         </div>
+        <select
+          value={period}
+          onChange={(e) => setPeriod(e.target.value)}
+          title="Period"
+          className="px-3 py-2 text-sm font-semibold border border-slate-200 rounded-lg bg-white text-slate-700 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+        >
+          <option value="ALL">All Periods</option>
+          {periods.map((p) => (
+            <option key={p.key} value={p.key}>{p.label}</option>
+          ))}
+        </select>
         <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg text-xs font-semibold">
           {(['ALL', 'B2B', 'RCM-UR', 'IMPORTSERVICE'] as const).map((t) => (
             <button key={t} onClick={() => setTypeFilter(t)}
@@ -640,12 +745,12 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
         )}
         <button onClick={() => setShowLedgerPicker((p) => !p)}
           className={`px-3 py-1.5 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border transition-colors ${
-            showLedgerPicker || extraGstLedgers.length > 0
+            showLedgerPicker || gstSelection !== null
               ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
               : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
           }`}>
           <Settings2 size={13} />
-          GST Ledgers{extraGstLedgers.length > 0 ? ` (+${extraGstLedgers.length})` : ''}
+          GST Ledgers ({selectedSet.size}{gstSelection !== null ? ' · custom' : ''})
         </button>
         <button onClick={handleExport} disabled={isExporting}
           className="px-4 py-2 inline-flex items-center gap-2 text-sm font-bold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:bg-slate-300 transition-colors shadow-sm">
@@ -654,57 +759,92 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
         </button>
       </div>
 
-      {/* ── GST Ledger Picker ────────────────────────────────────────────── */}
-      {showLedgerPicker && (
-        <div className="bg-white border border-indigo-200 rounded-xl shadow-sm p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-bold text-slate-900">GST Input Ledger Settings</p>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Auto-detected {potentialMissLedgers.length === 0 ? 'all' : 'some'} GST ledgers.
-                {potentialMissLedgers.length > 0
-                  ? ' Check additional ledgers below to include them in IGST/CGST/SGST totals.'
-                  : ' No potential-miss ledgers found.'}
-              </p>
+      {/* ── GST Input Ledger Picker (searchable multi-select) ─────────────── */}
+      {showLedgerPicker && (() => {
+        const ql = ledgerSearch.trim().toLowerCase();
+        const filtered = candidates.filter((c) =>
+          !ql ||
+          c.ledgerName.toLowerCase().includes(ql) ||
+          (c.parentGroup || '').toLowerCase().includes(ql) ||
+          (c.gstDutyHead || '').toLowerCase().includes(ql),
+        );
+        const toggle = (name: string, on: boolean) => {
+          setGstSelection((prev) => {
+            const base = new Set(prev ?? autoSelected);
+            if (on) base.add(name); else base.delete(name);
+            return [...base];
+          });
+        };
+        const bulk = (on: boolean) => {
+          setGstSelection((prev) => {
+            const base = new Set(prev ?? autoSelected);
+            for (const c of filtered) { if (on) base.add(c.ledgerName); else base.delete(c.ledgerName); }
+            return [...base];
+          });
+        };
+        const catTag: Record<LedgerAuditCategory, { txt: string; cls: string }> = {
+          'Selected':       { txt: 'auto',     cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+          'Excluded':       { txt: 'excluded', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+          'Potential Miss': { txt: 'review',   cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+        };
+        return (
+          <div className="bg-white border border-indigo-200 rounded-xl shadow-sm p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <p className="text-sm font-bold text-slate-900">
+                  GST Input Ledgers — {selectedSet.size} selected {gstSelection === null ? '(auto)' : '(custom)'}
+                </p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Tick the ledgers whose IGST/CGST/SGST feed the ITC totals. Auto-detected ledgers are pre-ticked — untick to exclude, tick greyed ones to add.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 text-xs font-semibold">
+                <button onClick={() => bulk(true)} className="px-2.5 py-1 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Select shown</button>
+                <button onClick={() => bulk(false)} className="px-2.5 py-1 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Clear shown</button>
+                <button onClick={() => setGstSelection(null)} disabled={gstSelection === null}
+                  className="px-2.5 py-1 rounded-md border border-indigo-200 text-indigo-700 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-default">Reset to auto</button>
+              </div>
             </div>
-            {extraGstLedgers.length > 0 && (
-              <button onClick={() => setExtraGstLedgers([])}
-                className="text-xs text-red-600 hover:text-red-700 font-semibold underline underline-offset-2">
-                Clear all
-              </button>
+            <div className="relative">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input type="text" value={ledgerSearch} onChange={(e) => setLedgerSearch(e.target.value)}
+                placeholder="Search ledger, group, duty head…"
+                className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
+            </div>
+            {filtered.length === 0 ? (
+              <p className="text-xs text-slate-500 px-3 py-2">No ledgers match “{ledgerSearch}”.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5 max-h-72 overflow-y-auto pr-1">
+                {filtered.map((c) => {
+                  const checked = selectedSet.has(c.ledgerName);
+                  const tag = catTag[c.category];
+                  return (
+                    <label key={c.ledgerName}
+                      className={`flex items-start gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
+                        checked ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
+                      }`}>
+                      <input type="checkbox" checked={checked}
+                        onChange={(e) => toggle(c.ledgerName, e.target.checked)}
+                        className="mt-0.5 accent-indigo-600 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs font-semibold text-slate-900 truncate">{c.ledgerName}</p>
+                          <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold border ${tag.cls}`}>{tag.txt}</span>
+                          {c.gstComponent && <span className="shrink-0 text-[9px] font-bold text-slate-400">{c.gstComponent}</span>}
+                          {c.isRcmInput === 'Yes' && <span className="shrink-0 text-[9px] font-bold text-orange-600">RCM</span>}
+                        </div>
+                        <p className="text-[10px] text-slate-500 truncate">
+                          {c.parentGroup}{c.gstDutyHead ? ` · ${c.gstDutyHead}` : ''}
+                        </p>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
             )}
           </div>
-          {potentialMissLedgers.length === 0 ? (
-            <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-              All GST-related ledgers were auto-detected. If totals are still 0, verify that ledger parent groups are set to <code className="font-mono">GST</code> or <code className="font-mono">Duties &amp; Taxes</code> in Tally.
-            </p>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5 max-h-56 overflow-y-auto pr-1">
-              {potentialMissLedgers.map((row) => {
-                const checked = extraGstLedgers.includes(row.ledgerName);
-                return (
-                  <label key={row.ledgerName}
-                    className={`flex items-start gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
-                      checked ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
-                    }`}>
-                    <input type="checkbox" checked={checked} onChange={(e) => {
-                      setExtraGstLedgers((prev) =>
-                        e.target.checked ? [...prev, row.ledgerName] : prev.filter((n) => n !== row.ledgerName)
-                      );
-                    }} className="mt-0.5 accent-indigo-600 shrink-0" />
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold text-slate-900 truncate">{row.ledgerName}</p>
-                      <p className="text-[10px] text-slate-500 truncate">
-                        {row.parentGroup}{row.gstDutyHead ? ` · ${row.gstDutyHead}` : ''}
-                      </p>
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
+        );
+      })()}
 
       {/* ── Table ────────────────────────────────────────────────────────── */}
       <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
