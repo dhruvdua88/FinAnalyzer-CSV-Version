@@ -652,65 +652,110 @@ export const buildOrphanGST = (store: TallyStore, opts: ItcQueryOpts = {}): Orph
 };
 
 // ── Ledger Audit ─────────────────────────────────────────────────────────────
+//
+// Self-documents which ledgers are in scope as GST *input*. Mirrors the Python
+// build_ledger_audit() exactly so the Excel sheet reconciles 1:1:
+//   • Only candidate ledgers are considered — parent = 'GST', or parent =
+//     'Duties & Taxes' with a duty_head. Everything else is skipped UNLESS the
+//     name carries a GST keyword (then it's flagged 'Potential Miss').
+//   • Expense ledgers are NOT audited here — this sheet is GST-input only.
 
 export type LedgerAuditCategory = 'Selected' | 'Excluded' | 'Potential Miss';
+
+// Keywords that suggest a ledger might be a GST input even outside the standard
+// 'GST' / 'Duties & Taxes' groups. Mirrors Python _POTENTIAL_MISS_KEYWORDS.
+const POTENTIAL_MISS_KEYWORDS = [
+  'igst', 'cgst', 'sgst', 'utgst', 'gst input', 'input tax credit', 'itc',
+];
 
 export interface LedgerAuditRow {
   ledgerName: string;
   parentGroup: string;
-  primaryGroup: string;
+  primaryGroup: string;       // kept for the in-app picker; not in the Excel sheet
   gstDutyHead: string;
   category: LedgerAuditCategory;
-  reason: string;
+  reason: string;             // Exclusion / Note
+  gstComponent: '' | 'IGST' | 'CGST' | 'SGST' | 'OTHER_GST';
+  isRcmInput: 'Yes' | '';
+  isRcmPayable: 'Yes' | '';
+  firedInPeriod: 'Yes' | '';
+  ledgerGstin: string;
+  gstRegType: string;
 }
 
-export const buildLedgerAudit = (store: TallyStore): LedgerAuditRow[] => {
+export const buildLedgerAudit = (store: TallyStore, opts: ItcQueryOpts = {}): LedgerAuditRow[] => {
+  const { dateFrom, dateTo } = opts;
+
+  // "Fired in Period" = ledger appeared in an accounting line whose voucher
+  // falls inside the date window. Build the set once.
+  const guidDate = new Map<string, string>();
+  for (const v of store.vouchers.values()) guidDate.set(v.guid, v.date || '');
+  const fired = new Set<string>();
+  for (const line of store.accountingLines) {
+    const d = guidDate.get(line.guid) || '';
+    if (dateFrom && d && d < dateFrom) continue;
+    if (dateTo && d && d > dateTo) continue;
+    if (line.ledger) fired.add(line.ledger);
+  }
+
   const out: LedgerAuditRow[] = [];
 
   for (const ledger of store.ledgers.values()) {
-    const primary = store.primaryGroupFor(ledger.name);
-    const isExpensePrimary = TARGET_PRIMARIES.has(primary);
-    const isGst = isInputGstLedger(ledger);
+    const name = ledger.name || '';
+    const parent = ledger.parent || '';
+    const dutyHead = (ledger.gst_duty_head || '').trim();
+
+    // Candidate gate — same as isInputGstLedger's group test (direct parent).
+    const isGstGroup = parent === 'GST';
+    const isDutiesWithHead = parent === 'Duties & Taxes' && !!dutyHead;
+    const isCandidate = isGstGroup || isDutiesWithHead;
+
+    const nameLower = name.toLowerCase();
 
     let category: LedgerAuditCategory;
     let reason: string;
 
-    if (isGst) {
-      category = 'Selected';
-      reason = 'Input GST ledger (included in ITC)';
-    } else if (isExpensePrimary) {
-      category = 'Selected';
-      reason = `Expense ledger under ${primary}`;
-    } else {
-      // Check if it could be a missed GST ledger
-      const name = (ledger.name || '').toUpperCase();
-      const hasGstKeyword = name.includes('GST') || name.includes('IGST') || name.includes('CGST') || name.includes('SGST');
-      const parent = ledger.parent || '';
-      const isDutiesTax = parent === 'Duties & Taxes';
-
-      if (hasGstKeyword || isDutiesTax) {
-        category = 'Potential Miss';
-        reason = isDutiesTax
-          ? `Under "Duties & Taxes" but gst_duty_head blank — may be unclassified GST`
-          : `Name contains GST keyword but not classified as input GST`;
-      } else {
+    if (isCandidate) {
+      const outputHit = OUTPUT_GST_KEYWORDS.find((kw) => nameLower.includes(kw));
+      if (outputHit) {
         category = 'Excluded';
-        reason = `Not an expense primary or GST input (parent: ${parent || 'none'})`;
+        reason = `Output keyword matched: '${outputHit}'`;
+      } else {
+        category = 'Selected';
+        reason = '';
       }
+    } else {
+      const hasGstKw = POTENTIAL_MISS_KEYWORDS.some((kw) => nameLower.includes(kw));
+      if (!hasGstKw) continue; // unrelated ledger — skip, exactly like Python
+      category = 'Potential Miss';
+      reason = `Name contains GST keyword but parent group is '${parent}' `
+        + `(not 'GST'/'Duties & Taxes') — confirm whether this is an input ledger`;
     }
 
+    // Component + RCM flags are meaningful only for Selected ledgers.
+    const selected = category === 'Selected';
+    const gstComponent = selected ? classifyGstType(name, ledger.gst_duty_head) : '';
+    const isRcmInput: 'Yes' | '' = selected && isRcmLedger(name) ? 'Yes' : '';
+    const isRcmPayable: 'Yes' | '' = selected && isRcmPayableLedger(name) ? 'Yes' : '';
+
     out.push({
-      ledgerName: ledger.name,
-      parentGroup: ledger.parent || '',
-      primaryGroup: primary,
-      gstDutyHead: ledger.gst_duty_head || '',
+      ledgerName: name,
+      parentGroup: parent,
+      primaryGroup: store.primaryGroupFor(name),
+      gstDutyHead: dutyHead,
       category,
       reason,
+      gstComponent,
+      isRcmInput,
+      isRcmPayable,
+      firedInPeriod: fired.has(name) ? 'Yes' : '',
+      ledgerGstin: ledger.gstn || '',
+      gstRegType: ledger.gst_registration_type || '',
     });
   }
 
   out.sort((a, b) => {
-    const order: Record<LedgerAuditCategory, number> = { 'Selected': 0, 'Potential Miss': 1, 'Excluded': 2 };
+    const order: Record<LedgerAuditCategory, number> = { 'Selected': 0, 'Excluded': 1, 'Potential Miss': 2 };
     const diff = order[a.category] - order[b.category];
     if (diff !== 0) return diff;
     return a.ledgerName.localeCompare(b.ledgerName);

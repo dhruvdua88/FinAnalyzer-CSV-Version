@@ -23,6 +23,8 @@ import {
   useTallyStore,
   type ItcRow,
   type ItcType,
+  type ItcSummaryRow,
+  type LedgerAuditCategory,
 } from '../../services/tally';
 
 interface PurchaseGSTRegisterProps {
@@ -120,263 +122,422 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
       const XLSX = await import('xlsx-js-style');
       const wb = XLSX.utils.book_new();
       const stamp = new Date().toISOString().slice(0, 10);
+      const ref = XLSX.utils.encode_cell;
+      const range = XLSX.utils.encode_range;
 
-      // ── colour palette ────────────────────────────────────────────────────
-      const CLR = {
-        HEADER_BG: '1E3A5F',
-        HEADER_FG: 'FFFFFF',
-        ALT_BG:    'F1F5F9',
-        ORANGE:    'FFF3CD',
-        ORANGE_FG: '856404',
-        RED:       'FFE4E4',
-        RED_FG:    'C0392B',
-        TOTAL_BG:  'FFA500',
-        TOTAL_FG:  '000000',
-        GRAND_BG:  '1E3A5F',
-        GRAND_FG:  'FFFFFF',
-        GREEN_BG:  'E8F5E9',
-        AMBER_BG:  'FFF3E0',
-        MISS_BG:   'FFEBEE',
-        BORDER:    'CBD5E1',
-        WHITE:     'FFFFFF',
+      // ── Company / period banners ──────────────────────────────────────────
+      const company = store.meta.companyName || 'Unknown';
+      const periodFrom = store.meta.periodFrom || '';
+      const periodTo = store.meta.periodTo || '';
+      const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const fmtLong = (iso: string): string => {
+        const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        return m ? `${m[3]} ${MON[Number(m[2]) - 1]} ${m[1]}` : iso;
+      };
+      const dMmmY = (iso: string): string => {
+        const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        return m ? `${m[3]}-${MON[Number(m[2]) - 1]}-${m[1]}` : iso;
+      };
+      const filterDesc = (dateFrom || dateTo)
+        ? ` | Filter: ${dateFrom ? fmtLong(dateFrom) : 'start'} to ${dateTo ? fmtLong(dateTo) : 'end'}`
+        : '';
+      const periodStr = periodFrom ? `${periodFrom} to ${periodTo}` : '';
+      const displayPeriod = filterDesc ? filterDesc.replace(' | Filter: ', '') : periodStr;
+      const nowStr = new Date().toLocaleString('en-IN');
+
+      // ── Palette (mirrors purchase_register_itc.py) ────────────────────────
+      const C = {
+        HDR: '1F3864', WHITE: 'FFFFFF', ALT: 'EEF2F8', TOTAL: 'D6E4F0',
+        GRAND: '1F3864', ORANGE: 'FFD580', RED: 'FFCDD2',
+        SEL: 'E8F5E9', EXCL: 'FFF3E0', MISS: 'FFEBEE', TITLE_FG: '1F3864',
       } as const;
+      const thin = { style: 'thin', color: { rgb: 'B0B8C8' } };
+      const border = { top: thin, bottom: thin, left: thin, right: thin };
+      const NUM_PLAIN = '0.00';
+      const NUM_COMMA = '#,##0.00';
+      const DATEFMT = 'DD-MMM-YYYY';
 
-      type XlsxCell = {
-        v: string | number;
-        t: 's' | 'n';
-        s?: Record<string, unknown>;
-      };
-
-      const border = {
-        top:    { style: 'thin', color: { rgb: CLR.BORDER } },
-        bottom: { style: 'thin', color: { rgb: CLR.BORDER } },
-        left:   { style: 'thin', color: { rgb: CLR.BORDER } },
-        right:  { style: 'thin', color: { rgb: CLR.BORDER } },
-      };
-
-      const mkCell = (v: string | number, bold = false, bg?: string, fg?: string, right = false, numFmt?: string): XlsxCell => ({
-        v,
+      type Cell = { v: string | number; t: 's' | 'n'; s?: Record<string, unknown> };
+      const C0 = (v: string | number, s: Record<string, unknown> = {}): Cell => ({
+        v: v === null || v === undefined ? '' : v,
         t: typeof v === 'number' ? 'n' : 's',
-        s: {
-          font: { name: 'Calibri', sz: 10, bold, color: { rgb: fg || '334155' } },
-          fill: bg ? { fgColor: { rgb: bg } } : { fgColor: { rgb: CLR.WHITE } },
-          alignment: { horizontal: right ? 'right' : 'left', vertical: 'center', wrapText: false },
-          border,
-          ...(numFmt ? { numFmt } : {}),
-        },
+        s,
       });
+      const font = (bold = false, fg = '334155', sz = 10) => ({ name: 'Calibri', sz, bold, color: { rgb: fg } });
 
-      const hdrCell = (v: string): XlsxCell => mkCell(v, true, CLR.HEADER_BG, CLR.HEADER_FG);
-      const numFmt = '0.00';   // plain decimal, no thousands separator — matches Python
+      const hdrStyle = {
+        font: font(true, C.WHITE),
+        fill: { fgColor: { rgb: C.HDR } },
+        alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+        border,
+      };
+      const titleCell = (v: string): Cell => C0(v, { font: font(true, C.TITLE_FG, 13), alignment: { horizontal: 'left', vertical: 'center' } });
+      const bannerCell = (v: string): Cell => C0(v, { font: { name: 'Calibri', sz: 10, italic: true, color: { rgb: '555555' } } });
 
-      // ── helper: write a cell-by-cell sheet from header + data rows ────────
-      const buildSheet = (
+      const dataCell = (
+        v: string | number,
+        opts: { num?: boolean; comma?: boolean; date?: boolean; alt?: boolean; total?: boolean; grand?: boolean; fill?: string } = {},
+      ): Cell => {
+        const { num, comma, date, alt, total, grand, fill } = opts;
+        const s: Record<string, unknown> = {
+          border,
+          alignment: { vertical: 'center', horizontal: num || date ? 'right' : 'left' },
+        };
+        if (grand) { s.font = font(true, C.WHITE); s.fill = { fgColor: { rgb: C.GRAND } }; }
+        else if (total) { s.font = font(true); s.fill = { fgColor: { rgb: C.TOTAL } }; }
+        else if (fill) { s.font = font(); s.fill = { fgColor: { rgb: fill } }; }
+        else if (alt) { s.font = font(); s.fill = { fgColor: { rgb: C.ALT } }; }
+        else { s.font = font(); }
+        if (num && !grand && typeof v === 'number') s.numFmt = comma ? NUM_COMMA : NUM_PLAIN;
+        if (date) s.numFmt = DATEFMT;
+        return C0(v, s);
+      };
+
+      const setRange = (ws: Record<string, unknown>, rows: number, cols: number) => {
+        ws['!ref'] = range({ s: { r: 0, c: 0 }, e: { r: Math.max(rows - 1, 0), c: Math.max(cols - 1, 0) } });
+      };
+
+      type Merge = { s: { r: number; c: number }; e: { r: number; c: number } };
+
+      // Generic title + header + data-row table (ITC, Orphan).
+      const tableSheet = (
+        title: string,
         headers: string[],
-        dataRows: Array<Array<string | number>>,
-        colWidths: number[],
-        rowStyles: Array<{ bg: string; fg: string } | null>,
-        isNumCol: boolean[],
-        titleText?: string,
-      ) => {
+        rows: Array<Array<string | number>>,
+        cfg: {
+          numCols: boolean[];
+          commaCols?: boolean[];
+          dateCols?: boolean[];
+          widths: number[];
+          rowFill?: (i: number) => string | undefined;
+          footnote?: string;
+        },
+      ): Record<string, unknown> => {
         const ws: Record<string, unknown> = {};
+        const { numCols, commaCols = [], dateCols = [], widths, rowFill, footnote } = cfg;
         let R = 0;
-
-        if (titleText) {
-          // Row 0: merged title
-          for (let c = 0; c < headers.length; c++) {
-            ws[XLSX.utils.encode_cell({ r: R, c })] = c === 0
-              ? { v: titleText, t: 's', s: { font: { name: 'Calibri', sz: 12, bold: true, color: { rgb: CLR.HEADER_FG } }, fill: { fgColor: { rgb: CLR.HEADER_BG } }, alignment: { horizontal: 'center', vertical: 'center' }, border } }
-              : { v: '', t: 's', s: { fill: { fgColor: { rgb: CLR.HEADER_BG } }, border } };
-          }
-          R++;
-          // Row 1: blank
-          for (let c = 0; c < headers.length; c++) ws[XLSX.utils.encode_cell({ r: R, c })] = { v: '', t: 's', s: { fill: { fgColor: { rgb: CLR.WHITE } } } };
-          R++;
-        }
-
+        ws[ref({ r: R, c: 0 })] = titleCell(title);
+        R++; // title
+        R++; // blank
         const hdrRow = R;
-        for (let c = 0; c < headers.length; c++) ws[XLSX.utils.encode_cell({ r: R, c })] = hdrCell(headers[c]);
+        for (let c = 0; c < headers.length; c++) ws[ref({ r: R, c })] = C0(headers[c], hdrStyle);
         R++;
-
-        for (let i = 0; i < dataRows.length; i++) {
-          const row = dataRows[i];
-          const style = rowStyles[i];
-          const altBg = i % 2 === 0 ? CLR.WHITE : CLR.ALT_BG;
+        for (let i = 0; i < rows.length; i++) {
+          const even = (R % 2) === 0;
+          const fill = rowFill?.(i);
           for (let c = 0; c < headers.length; c++) {
-            const v = c < row.length ? row[c] : '';
-            const bg = style?.bg || altBg;
-            const fg = style?.fg;
-            ws[XLSX.utils.encode_cell({ r: R, c })] = mkCell(
-              v,
-              false,
-              bg,
-              fg,
-              isNumCol[c],
-              isNumCol[c] && typeof v === 'number' ? numFmt : undefined,
-            );
+            const v = c < rows[i].length ? rows[i][c] : '';
+            ws[ref({ r: R, c })] = dataCell(v, { num: numCols[c], comma: commaCols[c], date: dateCols[c], alt: even, fill });
           }
           R++;
         }
-
-        ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: R - 1, c: headers.length - 1 } });
-        ws['!cols'] = colWidths.map((w) => ({ wch: w }));
-        ws['!rows'] = Array.from({ length: R }, (_, i) => ({ hpx: i === 0 && titleText ? 22 : 18 }));
-        if (titleText) {
-          ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
-          ws['!freeze'] = { xSplit: 0, ySplit: hdrRow + 1 };
-        } else {
-          ws['!freeze'] = { xSplit: 0, ySplit: 1 };
+        const merges: Merge[] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
+        if (footnote) {
+          const fr = R + 1;
+          ws[ref({ r: fr, c: 0 })] = C0(footnote, { font: { name: 'Calibri', sz: 9, italic: true, color: { rgb: '7B1010' } } });
+          merges.push({ s: { r: fr, c: 0 }, e: { r: fr, c: Math.min(headers.length - 1, 11) } });
+          R = fr + 1;
         }
-        ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: hdrRow, c: 0 }, e: { r: hdrRow, c: headers.length - 1 } }) };
-
+        setRange(ws, R, headers.length);
+        ws['!cols'] = widths.map((w) => ({ wch: w }));
+        ws['!merges'] = merges;
+        ws['!freeze'] = { xSplit: 0, ySplit: hdrRow + 1 };
+        ws['!autofilter'] = { ref: range({ s: { r: hdrRow, c: 0 }, e: { r: hdrRow, c: headers.length - 1 } }) };
         return ws;
       };
 
-      // ════════════════════════════════════════════════════════════════════════
-      // Sheet 1: ITC
-      // ════════════════════════════════════════════════════════════════════════
+      // ── Sheet 1: ITC ──────────────────────────────────────────────────────
       const ITC_HEADERS = [
-        'Party GSTIN/UIN', 'Party Name', 'Vch No.', 'Date',
+        'Party GSTIN/UIN', 'Party name', 'Vch No.', 'Date',
         'Taxable', 'IGST', 'CGST', 'SGST', 'Tax',
         'Place of Supply', 'Reverse Charge', 'ITC Availability',
-        'Type', '3B Month', 'Books Month', 'FY', 'Posting Date',
-        'Expense Ledgers', 'Voucher Type', 'Voucher Number',
+        'Type', '3B Month', 'Books Month', 'Invoice Match', 'GSTIN Match', 'FY',
+        'Posting Date', 'Expense Ledgers', 'Voucher Type', 'Voucher Number',
         'Primary Group', 'ITC Type', 'Narration', 'Review Flag', 'GUID',
       ];
-      const ITC_NUM = ITC_HEADERS.map((h) => ['Taxable','IGST','CGST','SGST','Tax'].includes(h));
-      const ITC_WIDTHS = [22,28,18,12,14,12,12,12,14,18,8,8,14,12,12,8,12,40,16,16,20,16,40,8,36];
-
-      const itcDataRows = allRows.map((r) => [
-        r.partyGstinUin, r.partyName, r.vchNo, formatDDMMYYYY(r.date),
+      const ITC_AMT = new Set(['Taxable', 'IGST', 'CGST', 'SGST', 'Tax']);
+      const ITC_NUM = ITC_HEADERS.map((h) => ITC_AMT.has(h));
+      const ITC_DATE = ITC_HEADERS.map((h) => h === 'Date' || h === 'Posting Date');
+      const ITC_WIDTHS = [20,34,22,14,16,14,12,12,14,18,12,12,14,12,12,18,18,10,14,50,16,20,22,16,40,12,38];
+      const itcRows = allRows.map((r) => [
+        r.partyGstinUin, r.partyName, r.vchNo, dMmmY(r.date),
         r.taxable, r.igst, r.cgst, r.sgst, r.tax,
         r.placeOfSupply, r.reverseCharge, r.itcAvailability,
-        r.type, r.m3b, r.booksMonth, r.fy, formatDDMMYYYY(r.postingDate),
-        r.expenseLedgers, r.voucherType, r.voucherNumber,
+        r.type, r.m3b, r.booksMonth, '', '', r.fy,
+        dMmmY(r.postingDate), r.expenseLedgers, r.voucherType, r.voucherNumber,
         r.primaryGroup, r.itcType, r.narration, r.reviewFlag, r.guid,
       ] as Array<string | number>);
-
-      const itcRowStyles = allRows.map((r): { bg: string; fg: string } | null => {
-        if (Math.abs(r.cgst - r.sgst) > 0.005) return { bg: CLR.RED, fg: CLR.RED_FG };
-        if (r.tax === 0) return { bg: CLR.ORANGE, fg: CLR.ORANGE_FG };
-        return null;
-      });
-
-      const wsItc = buildSheet(ITC_HEADERS, itcDataRows, ITC_WIDTHS, itcRowStyles, ITC_NUM, 'Purchase ITC Register');
+      const itcFill = (i: number): string | undefined => {
+        const r = allRows[i];
+        if (Math.abs(r.cgst - r.sgst) > 0.005) return C.RED;
+        if (r.tax === 0) return C.ORANGE;
+        return undefined;
+      };
+      const wsItc = tableSheet(
+        `ITC Register  |  ${company}${filterDesc}`,
+        ITC_HEADERS, itcRows,
+        {
+          numCols: ITC_NUM, dateCols: ITC_DATE, widths: ITC_WIDTHS, rowFill: itcFill,
+          footnote: '★  ORANGE = Tax is ₹0 — check whether RCM applies (unregistered supplier, import of service, GTA, legal fees, etc.). If yes, rebook with RCM ledger and reclassify as RCM-UR.     RED = CGST ≠ SGST — data entry error; both must be equal for intra-state supply.',
+        },
+      );
       XLSX.utils.book_append_sheet(wb, wsItc, 'ITC');
 
-      // ════════════════════════════════════════════════════════════════════════
-      // Sheet 2: ITC Summary
-      // ════════════════════════════════════════════════════════════════════════
-      const summary = buildItcSummary(allRows);
-      const SUM_HEADERS = ['Block', 'ITC Type', 'Month', 'Count', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total GST'];
-      const SUM_NUM = [false, false, false, true, true, true, true, true, true];
-      const SUM_WIDTHS = [14, 16, 16, 10, 16, 14, 14, 14, 14];
+      // ── Sheet 2: ITC Summary (two stacked blocks + legend) ────────────────
+      const sections = buildItcSummary(allRows);
+      const SUM_HDRS = ['Month', '# Invoices', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total Tax', '3B Ref'];
+      const SUM_NUMSET = new Set(['# Invoices', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total Tax']);
+      const TYPE_LABEL: Record<ItcType, string> = {
+        'B2B': 'B2B (Regular)   —   4(A)(5) All Other ITC',
+        'RCM-UR': 'RCM-UR (Unregistered)   —   4(A)(3) Reverse Charge',
+        'IMPORTSERVICE': 'Import of Services   —   4(A)(2) Import of Services',
+      };
+      const TYPE_REF: Record<ItcType, string> = {
+        'B2B': '4(A)(5) All Other ITC',
+        'RCM-UR': '4(A)(3) Reverse Charge',
+        'IMPORTSERVICE': '4(A)(2) Import of Services',
+      };
+      const BLOCK_LABEL: Record<string, string> = { 'Books Month': 'A.  By BOOKS MONTH', '3B Month': 'B.  By 3B MONTH' };
+      const TYPES_ORDER: ItcType[] = ['B2B', 'RCM-UR', 'IMPORTSERVICE'];
 
-      const sumDataRows: Array<Array<string | number>> = [];
-      const sumStyles: Array<{ bg: string; fg: string } | null> = [];
-      for (const sec of summary) {
-        for (const row of sec.rows) {
-          sumDataRows.push([
-            sec.block, sec.type, row.month,
-            row.count, row.taxable, row.igst, row.cgst, row.sgst, row.tax,
-          ]);
-          if (row.isGrandTotal) sumStyles.push({ bg: CLR.GRAND_BG, fg: CLR.GRAND_FG });
-          else if (row.isTotal) sumStyles.push({ bg: CLR.TOTAL_BG, fg: CLR.TOTAL_FG });
-          else sumStyles.push(null);
-        }
+      const wsSum: Record<string, unknown> = {};
+      let SR = 0;
+      const sumMerges: Merge[] = [];
+      const centerNonNum = (cell: Cell, isNum: boolean) => {
+        if (!isNum) cell.s = { ...(cell.s || {}), alignment: { vertical: 'center', horizontal: 'center' } };
+        return cell;
+      };
+      wsSum[ref({ r: SR, c: 0 })] = titleCell('ITC Register Summary — for 3B reconciliation');
+      sumMerges.push({ s: { r: SR, c: 0 }, e: { r: SR, c: 7 } }); SR++;
+      wsSum[ref({ r: SR, c: 0 })] = bannerCell(`Company: ${company}   |   Period: ${displayPeriod}   |   Generated: ${nowStr}   |   Match Books-Month section against your books; 3B-Month section against filed 3B.`);
+      sumMerges.push({ s: { r: SR, c: 0 }, e: { r: SR, c: 7 } }); SR++;
+      const legendVals = ['Legend:', 'Match', '', 'Mismatch', '', 'Only in Books', '', 'Only in 2B'];
+      const legendFills: Array<string | undefined> = [undefined, 'C8E6C9', undefined, 'FFCDD2', undefined, 'FFF9C4', undefined, 'E3F2FD'];
+      for (let c = 0; c < 8; c++) {
+        const f = legendFills[c];
+        wsSum[ref({ r: SR, c })] = C0(legendVals[c], { font: font(!!f), alignment: { horizontal: 'center' }, ...(f ? { fill: { fgColor: { rgb: f } } } : {}) });
       }
-      const wsSummary = buildSheet(SUM_HEADERS, sumDataRows, SUM_WIDTHS, sumStyles, SUM_NUM, 'ITC Summary (GSTR-3B)');
-      XLSX.utils.book_append_sheet(wb, wsSummary, 'ITC Summary');
+      SR += 2; // legend + blank
 
-      // ════════════════════════════════════════════════════════════════════════
-      // Sheet 3: GL Control
-      // ════════════════════════════════════════════════════════════════════════
+      const renderBlock = (block: 'Books Month' | '3B Month') => {
+        wsSum[ref({ r: SR, c: 0 })] = C0(BLOCK_LABEL[block], { font: font(true, C.TITLE_FG, 12) });
+        sumMerges.push({ s: { r: SR, c: 0 }, e: { r: SR, c: 7 } }); SR += 2; // label + blank
+        const blockSections = sections.filter((s) => s.block === block);
+        let grand: ItcSummaryRow | undefined;
+        for (const s of blockSections) { const g = s.rows.find((r) => r.isGrandTotal); if (g) grand = g; }
+        for (const type of TYPES_ORDER) {
+          const sec = blockSections.find((s) => s.type === type);
+          if (!sec) continue;
+          const monthRows = sec.rows.filter((r) => !r.isTotal && !r.isGrandTotal);
+          if (monthRows.length === 0) continue;
+          const totalRow = sec.rows.find((r) => r.isTotal);
+          wsSum[ref({ r: SR, c: 0 })] = C0(TYPE_LABEL[type], { font: font(true, C.TITLE_FG) });
+          sumMerges.push({ s: { r: SR, c: 0 }, e: { r: SR, c: 7 } }); SR++;
+          for (let c = 0; c < 8; c++) wsSum[ref({ r: SR, c })] = C0(SUM_HDRS[c], hdrStyle);
+          SR++;
+          const emit = (row: ItcSummaryRow, isTot: boolean) => {
+            const vals: Array<string | number> = [row.month, row.count, row.taxable, row.igst, row.cgst, row.sgst, row.tax, TYPE_REF[type]];
+            const even = (SR % 2) === 0;
+            for (let c = 0; c < 8; c++) {
+              const isNum = SUM_NUMSET.has(SUM_HDRS[c]);
+              wsSum[ref({ r: SR, c })] = centerNonNum(dataCell(vals[c], { num: isNum, comma: isNum, total: isTot, alt: !isTot && even }), isNum);
+            }
+            SR++;
+          };
+          for (const m of monthRows) emit(m, false);
+          if (totalRow) emit(totalRow, true);
+          SR++; // blank after sub-section
+        }
+        if (grand) {
+          const vals: Array<string | number> = [grand.month, grand.count, grand.taxable, grand.igst, grand.cgst, grand.sgst, grand.tax, ''];
+          for (let c = 0; c < 8; c++) {
+            const isNum = SUM_NUMSET.has(SUM_HDRS[c]);
+            wsSum[ref({ r: SR, c })] = centerNonNum(dataCell(vals[c], { num: isNum, comma: isNum, grand: true }), isNum);
+          }
+          SR++;
+        }
+        SR += 2; // spacing between blocks
+      };
+      renderBlock('Books Month');
+      renderBlock('3B Month');
+      setRange(wsSum, SR, 8);
+      wsSum['!cols'] = [18, 12, 18, 16, 14, 14, 16, 30].map((w) => ({ wch: w }));
+      wsSum['!merges'] = sumMerges;
+      wsSum['!freeze'] = { xSplit: 0, ySplit: 4 };
+      XLSX.utils.book_append_sheet(wb, wsSum, 'ITC Summary');
+
+      // ── Sheet 3: GL Control (with notes block) ────────────────────────────
       const glRows = buildGLControl(store, { dateFrom, dateTo, gstInputLedgers: extraGstLedgers });
-      const GL_HEADERS = [
-        'Primary Group',
-        'GL: #Vouchers', 'GL: Taxable Value',
-        'ITC: #Vouchers', 'ITC: Taxable Value',
-        'ITC: IGST', 'ITC: CGST', 'ITC: SGST', 'ITC: Total GST',
-        'No-GST: #Vouchers', 'No-GST: Taxable Value',
-        '% ITC Coverage',
+      const GL_HDRS = [
+        'Primary Group', 'GL: # Vouchers', 'GL: Taxable Value',
+        'ITC: # Vouchers', 'ITC: Taxable Value',
+        'ITC: IGST', 'ITC: CGST', 'ITC: SGST / UTGST', 'ITC: Total GST',
+        'No-GST: # Vouchers', 'No-GST: Taxable Value', '% ITC Coverage',
       ];
-      const GL_NUM = [false, true, true, true, true, true, true, true, true, true, true, true];
-      const GL_WIDTHS = [22, 14, 18, 14, 18, 14, 14, 14, 16, 16, 18, 16];
-
-      const glDataRows = glRows.map((r) => [
-        r.primaryGroup,
-        r.glVouchers, r.glTaxable,
-        r.itcVouchers, r.itcTaxable,
-        r.itcIgst, r.itcCgst, r.itcSgst, r.itcTotalGst,
-        r.noGstVouchers, r.noGstTaxable,
-        r.itcCoverage,
-      ] as Array<string | number>);
-      const glStyles = glRows.map((r): { bg: string; fg: string } | null =>
-        r.isGrandTotal ? { bg: CLR.GRAND_BG, fg: CLR.GRAND_FG } : null
-      );
-      const wsGL = buildSheet(GL_HEADERS, glDataRows, GL_WIDTHS, glStyles, GL_NUM, 'GL Control (ITC Coverage)');
+      const GL_COMMA = new Set(['GL: Taxable Value', 'ITC: Taxable Value', 'ITC: IGST', 'ITC: CGST', 'ITC: SGST / UTGST', 'ITC: Total GST', 'No-GST: Taxable Value']);
+      const GL_WIDTHS = [26, 16, 18, 14, 18, 14, 12, 14, 14, 16, 18, 50];
+      const wsGL: Record<string, unknown> = {};
+      let GR = 0;
+      const glMerges: Merge[] = [];
+      wsGL[ref({ r: GR, c: 0 })] = titleCell('GL Control — Tally GL vs ITC Register');
+      glMerges.push({ s: { r: GR, c: 0 }, e: { r: GR, c: GL_HDRS.length - 1 } }); GR++;
+      wsGL[ref({ r: GR, c: 0 })] = bannerCell(`Period: ${displayPeriod}   |   Each voucher counted ONCE regardless of number of expense lines.`); GR += 2;
+      const glNotes = [
+        'HOW TO READ THIS SHEET',
+        'GL: # Vouchers (Total)  — all accounting vouchers in the Tally export for this period that hit this primary group',
+        'GL: Taxable Value        — total debit to this group (sum of all accounting lines, abs value)',
+        'ITC: # Vouchers          — subset of above that have at least one GST input line (captured in ITC register)',
+        'ITC: Taxable Value       — expense base for those ITC vouchers',
+        'ITC: Total GST           — total input credit captured',
+        'No-GST: # Vouchers       — vouchers that hit this group but have NO GST input (unregistered / exempt vendors, etc.)',
+        '% ITC Coverage           — ITC taxable value ÷ GL taxable value',
+      ];
+      glNotes.forEach((n, i) => {
+        wsGL[ref({ r: GR, c: 0 })] = C0(n, { font: { name: 'Calibri', sz: 10, bold: i === 0, italic: i !== 0, color: { rgb: '444444' } } });
+        GR++;
+      });
+      GR++; // blank
+      const glHdrRow = GR;
+      for (let c = 0; c < GL_HDRS.length; c++) wsGL[ref({ r: GR, c })] = C0(GL_HDRS[c], hdrStyle);
+      GR++;
+      for (const r of glRows) {
+        const grand = r.isGrandTotal;
+        const coverage = grand
+          ? '★ One voucher can hit multiple groups — voucher counts are per-group only'
+          : (r.glTaxable > 0 ? `${r.itcCoverage.toFixed(1)}%` : '—');
+        const vals: Array<string | number> = [
+          grand ? 'GRAND TOTAL  ★' : r.primaryGroup,
+          grand ? '★ see note' : r.glVouchers,
+          r.glTaxable,
+          grand ? '★ see note' : r.itcVouchers,
+          r.itcTaxable, r.itcIgst, r.itcCgst, r.itcSgst, r.itcTotalGst,
+          grand ? '★ see note' : r.noGstVouchers,
+          r.noGstTaxable,
+          coverage,
+        ];
+        const even = (GR % 2) === 0;
+        for (let c = 0; c < GL_HDRS.length; c++) {
+          const isComma = GL_COMMA.has(GL_HDRS[c]);
+          wsGL[ref({ r: GR, c })] = dataCell(vals[c], { num: isComma, comma: isComma, grand, alt: !grand && even });
+        }
+        GR++;
+      }
+      setRange(wsGL, GR, GL_HDRS.length);
+      wsGL['!cols'] = GL_WIDTHS.map((w) => ({ wch: w }));
+      wsGL['!merges'] = glMerges;
+      wsGL['!freeze'] = { xSplit: 0, ySplit: glHdrRow + 1 };
+      wsGL['!autofilter'] = { ref: range({ s: { r: glHdrRow, c: 0 }, e: { r: glHdrRow, c: GL_HDRS.length - 1 } }) };
       XLSX.utils.book_append_sheet(wb, wsGL, 'GL Control');
 
-      // ════════════════════════════════════════════════════════════════════════
-      // Sheet 4: Orphan GST
-      // ════════════════════════════════════════════════════════════════════════
+      // ── Sheet 4: Orphan GST ───────────────────────────────────────────────
       const orphanRows = buildOrphanGST(store, { dateFrom, dateTo, gstInputLedgers: extraGstLedgers });
-      const ORP_HEADERS = [
-        'Voucher Date', 'Type', 'Number', 'Ref/Invoice No',
-        'Supplier/Party', 'GSTIN', 'Place of Supply',
-        'IGST', 'CGST', 'SGST/UTGST', 'Total GST',
-        'All Ledgers in Voucher', 'Narration', 'Issue',
-      ];
-      const ORP_NUM = [false, false, false, false, false, false, false, true, true, true, true, false, false, false];
-      const ORP_WIDTHS = [12, 14, 14, 18, 28, 22, 16, 12, 12, 12, 14, 50, 40, 30];
+      if (orphanRows.length === 0) {
+        const wsO: Record<string, unknown> = {};
+        wsO[ref({ r: 0, c: 0 })] = C0('No orphan GST vouchers found. ✓', { font: font(true, '2E7D32') });
+        setRange(wsO, 1, 1);
+        wsO['!cols'] = [{ wch: 40 }];
+        XLSX.utils.book_append_sheet(wb, wsO, 'Orphan GST');
+      } else {
+        const ORP_HDRS = ['Voucher Date', 'Voucher Type', 'Voucher Number', 'Ref / Invoice No', 'Supplier / Party', 'Supplier GSTIN', 'Place of Supply', 'IGST', 'CGST', 'SGST / UTGST', 'Total GST', 'All Ledgers in Voucher', 'Narration', 'Issue'];
+        const ORP_AMT = new Set(['IGST', 'CGST', 'SGST / UTGST', 'Total GST']);
+        const ORP_NUM = ORP_HDRS.map((h) => ORP_AMT.has(h));
+        const ORP_DATE = ORP_HDRS.map((h) => h === 'Voucher Date');
+        const ORP_WIDTHS = [14, 16, 20, 22, 34, 20, 18, 14, 12, 14, 14, 50, 40, 55];
+        const orpRows = orphanRows.map((r) => [
+          dMmmY(r.date), r.voucherType, r.voucherNumber, r.invoiceNo,
+          r.partyName, r.partyGstin, r.placeOfSupply,
+          r.igst, r.cgst, r.sgst, r.totalGst,
+          r.allLedgers.split(', ').join(' | '),
+          r.narration,
+          'GST input present but no Purchase/Exp/FA ledger hit',
+        ] as Array<string | number>);
+        const wsOrphan = tableSheet(`Orphan GST Vouchers  |  ${company}${filterDesc}`, ORP_HDRS, orpRows, { numCols: ORP_NUM, commaCols: ORP_NUM, dateCols: ORP_DATE, widths: ORP_WIDTHS });
+        XLSX.utils.book_append_sheet(wb, wsOrphan, 'Orphan GST');
+      }
 
-      const orpDataRows = orphanRows.map((r) => [
-        formatDDMMYYYY(r.date), r.voucherType, r.voucherNumber, r.invoiceNo,
-        r.partyName, r.partyGstin, r.placeOfSupply,
-        r.igst, r.cgst, r.sgst, r.totalGst,
-        r.allLedgers, r.narration, r.issue,
-      ] as Array<string | number>);
-      const orpStyles: Array<{ bg: string; fg: string } | null> = orphanRows.map((r) =>
-        r.issue ? { bg: CLR.ORANGE, fg: CLR.ORANGE_FG } : null
-      );
-      const wsOrphan = buildSheet(ORP_HEADERS, orpDataRows, ORP_WIDTHS, orpStyles, ORP_NUM, 'Orphan GST (no expense/purchase line)');
-      XLSX.utils.book_append_sheet(wb, wsOrphan, 'Orphan GST');
+      // ── Sheet 5: GST Ledger Audit (11 cols + legend + summary) ────────────
+      const auditRows = buildLedgerAudit(store, { dateFrom, dateTo });
+      const AUD_HDRS = ['Ledger Name', 'Parent Group', 'GST Duty Head', 'Status', 'Exclusion / Note', 'GST Component', 'Is RCM Input', 'Is RCM Payable', 'Fired in Period', 'Ledger GSTIN', 'GST Reg. Type'];
+      const AUD_WIDTHS = [44, 22, 18, 18, 60, 14, 12, 14, 14, 22, 18];
+      const STATUS_LABEL: Record<LedgerAuditCategory, string> = { 'Selected': 'Selected ✓', 'Excluded': 'Excluded', 'Potential Miss': '⚠ Potential Miss' };
+      const STATUS_FILL: Record<LedgerAuditCategory, string> = { 'Selected': C.SEL, 'Excluded': C.EXCL, 'Potential Miss': C.MISS };
+      const wsAud: Record<string, unknown> = {};
+      let AR = 0;
+      const audMerges: Merge[] = [];
+      wsAud[ref({ r: AR, c: 0 })] = titleCell('GST Ledger Audit  —  which ledgers are in scope as GST Input');
+      audMerges.push({ s: { r: AR, c: 0 }, e: { r: AR, c: 10 } }); AR++;
+      wsAud[ref({ r: AR, c: 0 })] = bannerCell(`Company: ${company}${filterDesc}   |   Generated: ${nowStr}   |   Review ⚠ Potential Miss rows — if any should be input GST, fix their group in Tally and re-run.`);
+      audMerges.push({ s: { r: AR, c: 0 }, e: { r: AR, c: 10 } }); AR++;
+      const audLegVals = ['Selected ✓', '— passed both gates; included as GST input', '', 'Excluded', '— under correct group but name has output keyword', '', '⚠ Potential Miss', '— name looks like GST input but group is wrong → check manually'];
+      const audLegFill: Record<number, string> = { 0: C.SEL, 3: C.EXCL, 6: C.MISS };
+      for (let c = 0; c < 8; c++) {
+        const f = audLegFill[c];
+        wsAud[ref({ r: AR, c })] = C0(audLegVals[c], f
+          ? { font: font(true, '334155', 9), fill: { fgColor: { rgb: f } }, alignment: { vertical: 'center' } }
+          : { font: { name: 'Calibri', sz: 9, italic: [1, 4, 7].includes(c), color: { rgb: '555555' } }, alignment: { vertical: 'center' } });
+      }
+      AR += 2; // legend + blank
+      const audHdrRow = AR;
+      for (let c = 0; c < AUD_HDRS.length; c++) wsAud[ref({ r: AR, c })] = C0(AUD_HDRS[c], hdrStyle);
+      AR++;
+      for (const r of auditRows) {
+        const fill = STATUS_FILL[r.category];
+        const vals: Array<string | number> = [r.ledgerName, r.parentGroup, r.gstDutyHead, STATUS_LABEL[r.category], r.reason, r.gstComponent, r.isRcmInput, r.isRcmPayable, r.firedInPeriod, r.ledgerGstin, r.gstRegType];
+        for (let c = 0; c < AUD_HDRS.length; c++) {
+          const cell = dataCell(vals[c], { fill });
+          if (c === 8 && r.firedInPeriod === 'Yes') cell.s = { ...(cell.s || {}), font: font(true, '1B5E20') };
+          wsAud[ref({ r: AR, c })] = cell;
+        }
+        AR++;
+      }
+      const cnt = (cat: LedgerAuditCategory) => auditRows.filter((r) => r.category === cat).length;
+      const firedCnt = auditRows.filter((r) => r.firedInPeriod === 'Yes').length;
+      AR++; // blank
+      wsAud[ref({ r: AR, c: 0 })] = C0(`Summary:   Selected ✓ = ${cnt('Selected')}   |   Excluded = ${cnt('Excluded')}   |   ⚠ Potential Miss = ${cnt('Potential Miss')}   |   Fired in Period = ${firedCnt}`, { font: font(true, C.TITLE_FG, 10) });
+      audMerges.push({ s: { r: AR, c: 0 }, e: { r: AR, c: 7 } }); AR++;
+      setRange(wsAud, AR, AUD_HDRS.length);
+      wsAud['!cols'] = AUD_WIDTHS.map((w) => ({ wch: w }));
+      wsAud['!merges'] = audMerges;
+      wsAud['!freeze'] = { xSplit: 0, ySplit: audHdrRow + 1 };
+      wsAud['!autofilter'] = { ref: range({ s: { r: audHdrRow, c: 0 }, e: { r: audHdrRow, c: AUD_HDRS.length - 1 } }) };
+      XLSX.utils.book_append_sheet(wb, wsAud, 'GST Ledger Audit');
 
-      // ════════════════════════════════════════════════════════════════════════
-      // Sheet 5: GST Ledger Audit
-      // ════════════════════════════════════════════════════════════════════════
-      const auditRows = buildLedgerAudit(store);
-      const AUD_HEADERS = ['Ledger Name', 'Parent Group', 'Primary Group', 'GST Duty Head', 'Category', 'Reason'];
-      const AUD_NUM = [false, false, false, false, false, false];
-      const AUD_WIDTHS = [36, 24, 22, 20, 16, 60];
-
-      const catBg: Record<string, string> = { 'Selected': CLR.GREEN_BG, 'Potential Miss': CLR.MISS_BG, 'Excluded': CLR.AMBER_BG };
-      const audDataRows = auditRows.map((r) => [r.ledgerName, r.parentGroup, r.primaryGroup, r.gstDutyHead, r.category, r.reason] as Array<string | number>);
-      const audStyles = auditRows.map((r): { bg: string; fg: string } | null => ({ bg: catBg[r.category] || CLR.WHITE, fg: '334155' }));
-      const wsAudit = buildSheet(AUD_HEADERS, audDataRows, AUD_WIDTHS, audStyles, AUD_NUM, 'GST Ledger Audit');
-      XLSX.utils.book_append_sheet(wb, wsAudit, 'GST Ledger Audit');
-
-      // ════════════════════════════════════════════════════════════════════════
-      // Sheet 6: Info
-      // ════════════════════════════════════════════════════════════════════════
+      // ── Sheet 6: Info (selection-rule documentation) ──────────────────────
       const wsInfo: Record<string, unknown> = {};
       const infoRows: Array<[string, string]> = [
-        ['Report', 'Purchase ITC Register'],
-        ['Generated On', new Date().toLocaleString('en-IN')],
-        ['Period From', dateFrom || 'N/A'],
-        ['Period To', dateTo || 'N/A'],
-        ['Total Vouchers', String(allRows.length)],
-        ['Total Taxable', allRows.reduce((s, r) => s + r.taxable, 0).toFixed(2)],
-        ['Total GST', allRows.reduce((s, r) => s + r.tax, 0).toFixed(2)],
-        ['Orphan GST Vouchers', String(orphanRows.length)],
-        ['Potential Miss Ledgers', String(auditRows.filter((r) => r.category === 'Potential Miss').length)],
+        ['Field', 'Value'],
+        ['Company', company],
+        ['File Period', periodStr],
+        ['Filter From', dateFrom || 'none'],
+        ['Filter To', dateTo || 'none'],
+        ['Generated At', new Date().toISOString().slice(0, 19).replace('T', ' ')],
+        ['ITC Rows', String(allRows.length)],
+        ['Orphan GST', String(orphanRows.length)],
+        ['Ledger Audit', `${auditRows.length} candidate ledgers reviewed`],
+        ['', ''],
+        ['Target Groups', 'Purchase Accounts | Direct Expenses | Indirect Expenses | Fixed Assets'],
+        ['GST Selection', "parent='GST' OR (parent='Duties & Taxes' AND gst_duty_head not null)"],
+        ['GST Excluded', 'output/sales GST, accrued, gst payable/balance ledgers'],
+        ['RCM Selection', "GST ledger name contains 'RCM'"],
+        ['RCM Payable', "'RCM' + 'PAYABLE' in name — invoice value only, not ITC"],
+        ['Type: RCM-UR', 'voucher has any RCM ledger'],
+        ['Type: IMPORT', 'no GSTIN + IGST > 0 + CGST = 0'],
+        ['Type: B2B', 'all other eligible vouchers'],
+        ['Orange rows', 'Tax = 0 on ITC sheet — review whether RCM applies'],
+        ['Red rows', 'CGST ≠ SGST — data entry error; both must be equal for intra-state'],
+        ['Script', 'purchase_register_itc.py (web port)'],
       ];
       infoRows.forEach(([k, v], i) => {
-        wsInfo[XLSX.utils.encode_cell({ r: i, c: 0 })] = mkCell(k, true, CLR.HEADER_BG, CLR.HEADER_FG);
-        wsInfo[XLSX.utils.encode_cell({ r: i, c: 1 })] = mkCell(v, false);
+        if (i === 0) {
+          wsInfo[ref({ r: i, c: 0 })] = C0(k, hdrStyle);
+          wsInfo[ref({ r: i, c: 1 })] = C0(v, hdrStyle);
+        } else {
+          wsInfo[ref({ r: i, c: 0 })] = C0(k, { font: font(true), border, alignment: { vertical: 'center', horizontal: 'left' } });
+          wsInfo[ref({ r: i, c: 1 })] = C0(v, { font: font(), border, alignment: { vertical: 'center', horizontal: 'left' } });
+        }
       });
-      wsInfo['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: infoRows.length - 1, c: 1 } });
-      wsInfo['!cols'] = [{ wch: 28 }, { wch: 36 }];
+      setRange(wsInfo, infoRows.length, 2);
+      wsInfo['!cols'] = [{ wch: 28 }, { wch: 80 }];
       XLSX.utils.book_append_sheet(wb, wsInfo, 'Info');
 
       XLSX.writeFile(wb, `Purchase_Register_ITC_${stamp}.xlsx`, { compression: true });
