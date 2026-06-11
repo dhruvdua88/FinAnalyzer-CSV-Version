@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { AlertCircle, Calendar, CheckCircle2, ChevronRight, Database, FileArchive, ListFilter, Filter, CheckSquare, Square } from 'lucide-react';
+import { AlertCircle, Calendar, CheckCircle2, ChevronRight, Database, FileArchive, ListFilter, Filter, CheckSquare, Square, Download, ArrowRight } from 'lucide-react';
 import { parseTallyLoaderDump } from '../services/tallyLoaderImportService';
 import { importTallyZip, TallyStore } from '../services/tally';
 import { LedgerEntry } from '../types';
@@ -434,6 +434,73 @@ const FileUpload: React.FC<FileUploadProps> = ({ onDataLoaded }) => {
       <div className="text-center mb-6 space-y-2">
         <h1 className="text-4xl font-black text-slate-900 tracking-tight">FinAnalyzer Pro</h1>
         <p className="text-slate-500 text-lg">Import a Tally Export (ZIP) to begin</p>
+      </div>
+
+      {/* ── First-time guide: get the ZIP from the Tally TSF Exporter ─────── */}
+      <div className="p-6 bg-gradient-to-br from-indigo-50 to-blue-50 rounded-2xl border border-indigo-200 shadow-sm">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-[10px] font-black uppercase tracking-widest px-2 py-0.5 bg-indigo-600 text-white rounded">
+            Start Here
+          </span>
+          <h2 className="text-base font-bold text-slate-900">First time? Get your Tally data in 3 steps</h2>
+        </div>
+        <p className="text-sm text-slate-600 mb-4">
+          FinAnalyzer reads a ZIP exported from Tally. You create that ZIP with our free
+          companion tool, the <strong>Tally TSF Exporter</strong> — then import it here.
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {/* Step 1 */}
+          <div className="relative bg-white rounded-xl border border-indigo-100 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-black">1</span>
+              <p className="text-sm font-bold text-slate-900">Download the Exporter</p>
+            </div>
+            <p className="text-xs text-slate-500">
+              Grab the latest Tally TSF Exporter (Windows). Unzip it and double-click
+              <code className="mx-1">TSF Exporter.exe</code>.
+            </p>
+          </div>
+          {/* Step 2 */}
+          <div className="relative bg-white rounded-xl border border-indigo-100 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-black">2</span>
+              <p className="text-sm font-bold text-slate-900">Export your CSV ZIP</p>
+            </div>
+            <p className="text-xs text-slate-500">
+              In the Exporter, pick your From/To dates and click
+              <strong className="mx-1">Run export and make zip</strong>. It produces one ZIP of clean CSV tables.
+            </p>
+          </div>
+          {/* Step 3 */}
+          <div className="relative bg-white rounded-xl border border-indigo-100 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-600 text-white text-xs font-black">3</span>
+              <p className="text-sm font-bold text-slate-900">Import it below</p>
+            </div>
+            <p className="text-xs text-slate-500">
+              Click <strong className="mx-1">Import ZIP</strong> in the card below and choose
+              the ZIP the Exporter just made. Done.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-col sm:flex-row sm:items-center gap-3">
+          <a href="https://github.com/dhruvdua88/Tally-TSF-Exporter/releases/latest/download/TSF-Exporter-staff.zip"
+            className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 transition-colors shadow-sm">
+            <Download size={18} />
+            Download Tally TSF Exporter
+          </a>
+          <a href="https://github.com/dhruvdua88/Tally-TSF-Exporter"
+            target="_blank" rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-700 hover:text-indigo-900 transition-colors">
+            Setup guide &amp; all versions
+            <ArrowRight size={14} />
+          </a>
+        </div>
+        <p className="text-[11px] text-slate-400 mt-2">
+          Windows tool, ~40&nbsp;MB. Already have a Tally export ZIP? Skip these steps and import it below.
+        </p>
       </div>
 
       {/* ── Primary: Tally Excel Export ZIP ──────────────────────────────── */}
