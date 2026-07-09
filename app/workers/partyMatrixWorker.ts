@@ -31,6 +31,23 @@ export interface CounterLedgerStat {
   voucherCount: number;
 }
 
+// ── Stock-item (194Q) types ──────────────────────────────────────────────────
+// Added so the matrix can break a party's purchases down to the actual stock
+// items bought (via trn_inventory ⋈ voucher ⋈ party), classify each as goods
+// vs service by HSN/SAC, and surface the 194Q taxable base (goods value only).
+
+export type StockNature = 'goods' | 'service';
+
+export interface StockItemStat {
+  item: string;
+  hsn: string;
+  gstRate: number;
+  nature: StockNature;
+  quantity: number;
+  value: number; // signed 194Q-style base: qty×rate + additional − discount, voucher-wise sign
+  voucherCount: number;
+}
+
 export interface PartyRow {
   partyName: string;
   totalSales: number;
@@ -53,6 +70,11 @@ export interface PartyRow {
   firstDate: string;
   lastDate: string;
   expenseLedgerList: string; // comma-separated top expense/purchase ledgers
+  // Stock-item (194Q) aggregates — populated only when inventory is supplied.
+  goodsValue: number; // 194Q taxable base: value of GOODS bought from this party
+  serviceValue: number; // value of SERVICE (SAC 99xx) lines — excluded from 194Q
+  panKey: string; // it_pan of the party ledger (for per-PAN threshold grouping); '' if none
+  stockItems: StockItemStat[]; // per-stock-item breakdown for the drill-down
 }
 
 export interface VoucherDetailRow {
@@ -72,6 +94,21 @@ export interface VoucherDetailRow {
   othersAmount: number;
 }
 
+export interface InventoryLineInput {
+  guid: string; // voucher guid — joins to the voucher's accounting lines
+  item: string; // stock item name
+  quantity: number;
+  amount: number; // item value (qty × rate) as stored in trn_inventory
+  additional_amount: number; // freight / duties / additional cost
+  discount_amount: number;
+}
+
+export interface StockMasterInput {
+  name: string; // stock item name (matches InventoryLineInput.item)
+  hsn: string; // gst_hsn_code (SAC = service when it starts with '99')
+  gstRate: number;
+}
+
 export interface PartyMatrixWorkerInput {
   txRows: LedgerEntry[];
   mstRows: LedgerEntry[];
@@ -79,6 +116,23 @@ export interface PartyMatrixWorkerInput {
   tdsLedgers: string[];
   gstLedgers: string[];
   rcmLedgers: string[];
+  // Optional stock inputs — when present, the worker builds per-party stock-item
+  // breakdowns and the Goods/Service/194Q-base aggregates. Older callers that
+  // omit these get the original ledger-only behaviour unchanged.
+  inventoryLines?: InventoryLineInput[];
+  stockMaster?: StockMasterInput[];
+}
+
+// Per-PAN 194Q assessment (Q4: threshold tested per PAN, aggregating all
+// ledgers that share a PAN). Goods value only; services excluded.
+export interface Pan194QStat {
+  pan: string;
+  parties: string[]; // ledger names sharing this PAN
+  goodsValue: number; // 194Q base (goods) across all same-PAN ledgers
+  serviceValue: number;
+  over50L: boolean; // |goodsValue| ≥ ₹50,00,000
+  excessOver50L: number; // max(0, |goodsValue| − 50L) — the taxable slab for 194Q
+  tds194qAt01pct: number; // 0.1% of excess (194Q rate when PAN is available)
 }
 
 export interface PartyMatrixWorkerOutput {
@@ -86,6 +140,7 @@ export interface PartyMatrixWorkerOutput {
   voucherDetails: VoucherDetailRow[];
   partyUniverseCount: number;
   unbalancedVoucherCount: number;
+  pan194q: Pan194QStat[];
   error?: string;
 }
 
@@ -117,7 +172,7 @@ export function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput 
   const { txRows, mstRows, primary, tdsLedgers, gstLedgers, rcmLedgers } = input;
 
   if (!primary) {
-    return { rows: [], voucherDetails: [], partyUniverseCount: 0, unbalancedVoucherCount: 0 };
+    return { rows: [], voucherDetails: [], partyUniverseCount: 0, unbalancedVoucherCount: 0, pan194q: [] };
   }
 
   const pNorm = norm(primary);
@@ -128,6 +183,7 @@ export function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput 
   // Party universe + closing balance reference from both master + tx rows
   const parties = new Set<string>();
   const closeRef = new Map<string, number>();
+  const panRef = new Map<string, string>(); // party name → it_pan (Q4: per-PAN threshold)
 
   const scan = (r: LedgerEntry) => {
     if (norm(r.TallyPrimary) !== pNorm) return;
@@ -138,14 +194,65 @@ export function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput 
     if (!closeRef.has(party) || (closeRef.get(party) === 0 && c !== 0)) {
       closeRef.set(party, c);
     }
+    const pan = String(r.pan || '').trim().toUpperCase();
+    if (pan && !panRef.get(party)) panRef.set(party, pan);
   };
   for (let i = 0; i < mstRows.length; i++) scan(mstRows[i]);
   for (let i = 0; i < txRows.length; i++) scan(txRows[i]);
+
+  // ── Stock inputs (194Q) ────────────────────────────────────────────────────
+  // Stock master: item name → HSN + rate. Goods vs service is decided purely by
+  // HSN/SAC per the sign-off (SAC codes start with '99' → service).
+  const stockMasterInput = input.stockMaster ?? [];
+  const inventoryInput = input.inventoryLines ?? [];
+  const hasStock = inventoryInput.length > 0;
+
+  const stockMeta = new Map<string, { hsn: string; gstRate: number; nature: StockNature }>();
+  for (let i = 0; i < stockMasterInput.length; i++) {
+    const m = stockMasterInput[i];
+    const key = norm(m.name);
+    if (!key) continue;
+    const hsn = String(m.hsn || '').trim();
+    stockMeta.set(key, {
+      hsn,
+      gstRate: toNum(m.gstRate),
+      nature: hsn.startsWith('99') ? 'service' : 'goods',
+    });
+  }
+
+  // Inventory lines indexed by voucher guid (trn_inventory.guid === voucher guid,
+  // shared with the accounting lines of the same voucher).
+  const invByGuid = new Map<string, InventoryLineInput[]>();
+  for (let i = 0; i < inventoryInput.length; i++) {
+    const line = inventoryInput[i];
+    const g = String(line.guid || '');
+    if (!g) continue;
+    let list = invByGuid.get(g);
+    if (!list) {
+      list = [];
+      invByGuid.set(g, list);
+    }
+    list.push(line);
+  }
+
+  // Voucher-wise spend direction (Q7). Raw inventory sign is unreliable in this
+  // export, so the direction is taken from the voucher type: a purchase adds to
+  // the 194Q base, a purchase return / debit note / rejection reduces it. Stock
+  // journals carry no party and never reach this map.
+  const voucherDir = (voucherType: string): number => {
+    const t = voucherType.toLowerCase();
+    if (t.includes('return') || t.includes('debit note') || t.includes('rejection out')) return -1;
+    return 1;
+  };
 
   // Row accumulator + per-party counter-ledger map
   interface PartyAcc extends PartyRow {
     _counterMap: Map<string, { bucket: Bucket; amount: number; vouchers: Set<string> }>;
     _vouchers: Set<string>;
+    _stockMap: Map<
+      string,
+      { hsn: string; gstRate: number; nature: StockNature; quantity: number; value: number; vouchers: Set<string> }
+    >;
   }
 
   const rows = new Map<string, PartyAcc>();
@@ -172,8 +279,13 @@ export function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput 
       firstDate: '',
       lastDate: '',
       expenseLedgerList: '',
+      goodsValue: 0,
+      serviceValue: 0,
+      panKey: panRef.get(party) ?? '',
+      stockItems: [],
       _counterMap: new Map(),
       _vouchers: new Set(),
+      _stockMap: new Map(),
     });
   });
 
@@ -291,6 +403,43 @@ export function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput 
       .map((c) => `${c.ledger}: ${c.amount.toFixed(2)}`)
       .join(' | ');
 
+    // Stock lines for this voucher (194Q). Aggregate per item first, then
+    // apportion by the same party share used for the ledger buckets.
+    // value = qty×rate + additional − discount (Q1), magnitude with a
+    // voucher-wise sign (Q7): purchase adds, return/debit-note subtracts.
+    interface VStock { hsn: string; gstRate: number; nature: StockNature; quantity: number; value: number }
+    const voucherStock = new Map<string, VStock>();
+    if (hasStock) {
+      const voucherGuid = String(sample.guid || '');
+      const dir = voucherDir(voucherType);
+      const invLines = voucherGuid ? invByGuid.get(voucherGuid) : undefined;
+      if (invLines) {
+        for (let i = 0; i < invLines.length; i++) {
+          const ln = invLines[i];
+          const item = String(ln.item || '').trim();
+          if (!item) continue;
+          const rawBase = toNum(ln.amount) + toNum(ln.additional_amount) - toNum(ln.discount_amount);
+          const value = Math.abs(rawBase) * dir;
+          const qty = Math.abs(toNum(ln.quantity)) * dir;
+          if (value === 0 && qty === 0) continue;
+          const meta = stockMeta.get(norm(item));
+          const existing = voucherStock.get(item);
+          if (existing) {
+            existing.quantity += qty;
+            existing.value += value;
+          } else {
+            voucherStock.set(item, {
+              hsn: meta?.hsn ?? '',
+              gstRate: meta?.gstRate ?? 0,
+              nature: meta?.nature ?? 'goods',
+              quantity: qty,
+              value,
+            });
+          }
+        }
+      }
+    }
+
     // Apportion to each party in the voucher by share of absolute flow
     partySigned.forEach((signedAmt, party) => {
       const row = rows.get(party);
@@ -324,6 +473,31 @@ export function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput 
         stat.amount += share * c.amount;
         stat.vouchers.add(vk);
       });
+
+      // Stock-item stats (apportioned) + Goods/Service running totals
+      if (voucherStock.size > 0) {
+        voucherStock.forEach((vs, item) => {
+          const appValue = share * vs.value;
+          const appQty = share * vs.quantity;
+          if (vs.nature === 'goods') row.goodsValue += appValue;
+          else row.serviceValue += appValue;
+          let stat = row._stockMap.get(item);
+          if (!stat) {
+            stat = {
+              hsn: vs.hsn,
+              gstRate: vs.gstRate,
+              nature: vs.nature,
+              quantity: 0,
+              value: 0,
+              vouchers: new Set(),
+            };
+            row._stockMap.set(item, stat);
+          }
+          stat.quantity += appQty;
+          stat.value += appValue;
+          stat.vouchers.add(vk);
+        });
+      }
 
       // Voucher-level tracking
       if (!row._vouchers.has(vk)) {
@@ -383,6 +557,18 @@ export function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput 
       .map((c) => c.ledger)
       .join(', ');
 
+    const stockItems: StockItemStat[] = Array.from(r._stockMap.entries())
+      .map(([item, stat]) => ({
+        item,
+        hsn: stat.hsn,
+        gstRate: stat.gstRate,
+        nature: stat.nature,
+        quantity: stat.quantity,
+        value: stat.value,
+        voucherCount: stat.vouchers.size,
+      }))
+      .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+
     out.push({
       partyName: r.partyName,
       totalSales: r.totalSales,
@@ -405,16 +591,58 @@ export function compute(input: PartyMatrixWorkerInput): PartyMatrixWorkerOutput 
       firstDate: r.firstDate,
       lastDate: r.lastDate,
       expenseLedgerList: expenseList,
+      goodsValue: r.goodsValue,
+      serviceValue: r.serviceValue,
+      panKey: r.panKey,
+      stockItems,
     });
   });
 
   out.sort((a, b) => a.partyName.localeCompare(b.partyName));
+
+  // Per-PAN 194Q rollup (Q4). Ledgers without a PAN are grouped under their own
+  // party name so a missing PAN never silently merges distinct suppliers.
+  const THRESHOLD_194Q = 5000000; // ₹50,00,000
+  const panAgg = new Map<string, Pan194QStat>();
+  for (let i = 0; i < out.length; i++) {
+    const r = out[i];
+    if (Math.abs(r.goodsValue) < 0.005 && Math.abs(r.serviceValue) < 0.005) continue;
+    const key = r.panKey || `(no PAN) ${r.partyName}`;
+    let agg = panAgg.get(key);
+    if (!agg) {
+      agg = {
+        pan: r.panKey,
+        parties: [],
+        goodsValue: 0,
+        serviceValue: 0,
+        over50L: false,
+        excessOver50L: 0,
+        tds194qAt01pct: 0,
+      };
+      panAgg.set(key, agg);
+    }
+    agg.parties.push(r.partyName);
+    agg.goodsValue += r.goodsValue;
+    agg.serviceValue += r.serviceValue;
+  }
+  const pan194q: Pan194QStat[] = Array.from(panAgg.values()).map((a) => {
+    const goodsAbs = Math.abs(a.goodsValue);
+    const excess = Math.max(0, goodsAbs - THRESHOLD_194Q);
+    return {
+      ...a,
+      over50L: goodsAbs >= THRESHOLD_194Q,
+      excessOver50L: excess,
+      tds194qAt01pct: excess * 0.001,
+    };
+  });
+  pan194q.sort((a, b) => Math.abs(b.goodsValue) - Math.abs(a.goodsValue));
 
   return {
     rows: out,
     voucherDetails,
     partyUniverseCount: parties.size,
     unbalancedVoucherCount: unbalanced,
+    pan194q,
   };
 }
 
@@ -431,6 +659,7 @@ if (typeof self !== 'undefined' && typeof (self as any).addEventListener === 'fu
         voucherDetails: [],
         partyUniverseCount: 0,
         unbalancedVoucherCount: 0,
+        pan194q: [],
         error: err?.message ?? 'Party Matrix worker failed',
       } satisfies PartyMatrixWorkerOutput);
     }

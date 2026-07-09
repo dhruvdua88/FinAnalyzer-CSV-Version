@@ -29,6 +29,11 @@ import type {
   PartyMatrixWorkerInput,
   PartyMatrixWorkerOutput,
   VoucherDetailRow,
+  StockItemStat,
+  StockNature,
+  Pan194QStat,
+  InventoryLineInput,
+  StockMasterInput,
 } from '../../workers/partyMatrixWorker';
 
 interface Props {
@@ -468,6 +473,38 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
     };
   }, [data]);
 
+  // ── Stock inputs for the 194Q breakdown ────────────────────────────────────
+  // Pulled straight from the relational TallyStore (present only for ZIP/TSF
+  // imports that carry trn_inventory + mst_stock_item). CSV-only sessions have
+  // no inventory, so these arrays are empty and the worker falls back to the
+  // original ledger-only matrix.
+  const { inventoryLines, stockMaster, hasStock } = useMemo(() => {
+    const inv: InventoryLineInput[] = [];
+    const mstMap = new Map<string, StockMasterInput>();
+    if (store) {
+      for (const line of store.inventoryLines || []) {
+        inv.push({
+          guid: String(line.guid || ''),
+          item: String(line.item || ''),
+          quantity: Number(line.quantity || 0),
+          amount: Number(line.amount || 0),
+          additional_amount: Number(line.additional_amount || 0),
+          discount_amount: Number(line.discount_amount || 0),
+        });
+      }
+      for (const si of store.stockItems.values()) {
+        const name = String(si.name || '').trim();
+        if (!name) continue;
+        mstMap.set(name.toLowerCase(), {
+          name,
+          hsn: String(si.gst_hsn_code || '').trim(),
+          gstRate: Number(si.gst_rate || 0),
+        });
+      }
+    }
+    return { inventoryLines: inv, stockMaster: Array.from(mstMap.values()), hasStock: inv.length > 0 };
+  }, [store]);
+
   // ── Selection state ────────────────────────────────────────────────────────
   const [selectedPrimary, setSelectedPrimary] = useState('');
   const [tdsLedgers, setTdsLedgers] = useState<string[]>([]);
@@ -556,7 +593,8 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
     voucherDetails: VoucherDetailRow[];
     partyUniverseCount: number;
     unbalancedVoucherCount: number;
-  }>({ rows: [], voucherDetails: [], partyUniverseCount: 0, unbalancedVoucherCount: 0 });
+    pan194q: Pan194QStat[];
+  }>({ rows: [], voucherDetails: [], partyUniverseCount: 0, unbalancedVoucherCount: 0, pan194q: [] });
   const [computing, setComputing] = useState(false);
 
   useEffect(() => {
@@ -575,6 +613,7 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
         voucherDetails: e.data.voucherDetails,
         partyUniverseCount: e.data.partyUniverseCount,
         unbalancedVoucherCount: e.data.unbalancedVoucherCount,
+        pan194q: e.data.pan194q ?? [],
       });
     };
     return () => {
@@ -586,7 +625,7 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
   useEffect(() => {
     if (!workerRef.current) return;
     if (!effectivePrimary) {
-      setAnalysis({ rows: [], voucherDetails: [], partyUniverseCount: 0, unbalancedVoucherCount: 0 });
+      setAnalysis({ rows: [], voucherDetails: [], partyUniverseCount: 0, unbalancedVoucherCount: 0, pan194q: [] });
       return;
     }
     const handle = window.setTimeout(() => {
@@ -598,11 +637,13 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
         tdsLedgers,
         gstLedgers,
         rcmLedgers,
+        inventoryLines,
+        stockMaster,
       };
       workerRef.current!.postMessage(payload);
     }, 180);
     return () => window.clearTimeout(handle);
-  }, [effectivePrimary, txRows, mstRows, tdsLedgers, gstLedgers, rcmLedgers]);
+  }, [effectivePrimary, txRows, mstRows, tdsLedgers, gstLedgers, rcmLedgers, inventoryLines, stockMaster]);
 
   // ── Search + anomaly + sort ────────────────────────────────────────────────
   const [anomaly, setAnomaly] = useState<AnomalyFilter>('all');
@@ -962,6 +1003,10 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
           'Others/Adj',
           'Net Balance (+Cr / -Dr)',
           'Top Expense/Purchase Ledgers',
+          'Goods Value (194Q Base)',
+          'Service Value (excl.)',
+          'PAN',
+          '194Q Status',
         ];
         const aoa: any[][] = [
           ['Party Ledger Matrix — Summary'],
@@ -991,6 +1036,10 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
             r.others,
             r.netBalance,
             r.expenseLedgerList,
+            r.goodsValue,
+            r.serviceValue,
+            r.panKey || (partyMasterByName.get(r.partyName.trim().toLowerCase())?.pan ?? ''),
+            Math.abs(r.goodsValue) >= 5000000 ? 'Over ₹50L — verify 194Q' : '',
           ]),
         );
         aoa.push([
@@ -1010,6 +1059,10 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
           totals.others,
           totals.net,
           '',
+          filteredRows.reduce((s, r) => s + r.goodsValue, 0),
+          filteredRows.reduce((s, r) => s + r.serviceValue, 0),
+          '',
+          '',
         ]);
         aoa.push([]);
         aoa.push(['Observations']);
@@ -1024,6 +1077,7 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
           { wch: 34 }, { wch: 10 }, { wch: 12 }, { wch: 12 },
           { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 },
           { wch: 14 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 18 }, { wch: 60 },
+          { wch: 18 }, { wch: 16 }, { wch: 14 }, { wch: 20 },
         ];
         ws['!merges'] = [
           { s: { r: 0, c: 0 }, e: { r: 0, c: lastCol } },
@@ -1066,6 +1120,21 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
             paint(ws, r, c, style);
           }
           paint(ws, r, 15, dataStyle(r, false));
+          // New stock columns: 16 Goods(194Q base) | 17 Service | 18 PAN | 19 194Q Status
+          const goodsStyle = dataStyle(r, true, true, '#,##0.00');
+          if (Math.abs(row.goodsValue) >= 5000000) {
+            goodsStyle.fill = { fgColor: { rgb: 'FEE2E2' } };
+            goodsStyle.font = { ...goodsStyle.font, color: { rgb: '9F1239' }, bold: true };
+          }
+          paint(ws, r, 16, goodsStyle);
+          paint(ws, r, 17, dataStyle(r, true, false, '#,##0.00'));
+          paint(ws, r, 18, dataStyle(r, false));
+          const statusStyle = dataStyle(r, false, true);
+          if (Math.abs(row.goodsValue) >= 5000000) {
+            statusStyle.fill = { fgColor: { rgb: 'FEE2E2' } };
+            statusStyle.font = { ...statusStyle.font, color: { rgb: '9F1239' }, bold: true };
+          }
+          paint(ws, r, 19, statusStyle);
         }
 
         const totalRow = firstData + filteredRows.length;
@@ -1077,6 +1146,10 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
           paint(ws, totalRow, c, totalStyle(true, fmt));
         }
         paint(ws, totalRow, 15, totalStyle(false));
+        paint(ws, totalRow, 16, totalStyle(true, '#,##0.00'));
+        paint(ws, totalRow, 17, totalStyle(true, '#,##0.00'));
+        paint(ws, totalRow, 18, totalStyle(false));
+        paint(ws, totalRow, 19, totalStyle(false));
 
         // Observations block
         const obsRow = totalRow + 2;
@@ -1239,6 +1312,177 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
           paint(ws, r, 13, dataStyle(r, false));
         }
         XLSX.utils.book_append_sheet(wb, ws, 'Voucher Detail');
+      }
+
+      // ═══════════════ Sheet: Party × Stock Item (194Q) ═══════════════
+      // Flat, filterable ledger of every stock item bought from each party.
+      // Goods drive the 194Q base; services (SAC 99xx) are shown but flagged
+      // excluded. Auditors can autofilter Nature = Goods and pivot by PAN.
+      if (hasStock) {
+        interface StockRow {
+          party: string; pan: string; item: string; hsn: string;
+          nature: StockNature; qty: number; gstRate: number; value: number; vch: number;
+        }
+        const stockRows: StockRow[] = [];
+        filteredRows.forEach((r) => {
+          const pan = r.panKey || (partyMasterByName.get(r.partyName.trim().toLowerCase())?.pan ?? '');
+          r.stockItems.forEach((si) => {
+            stockRows.push({
+              party: r.partyName, pan, item: si.item, hsn: si.hsn,
+              nature: si.nature, qty: si.quantity, gstRate: si.gstRate,
+              value: si.value, vch: si.voucherCount,
+            });
+          });
+        });
+        // Party goods total first, then item value — keeps a party's lines together.
+        const goodsByParty = new Map<string, number>();
+        filteredRows.forEach((r) => goodsByParty.set(r.partyName, r.goodsValue));
+        stockRows.sort((a, b) => {
+          const ga = Math.abs(goodsByParty.get(a.party) || 0);
+          const gb = Math.abs(goodsByParty.get(b.party) || 0);
+          if (gb !== ga) return gb - ga;
+          if (a.party !== b.party) return a.party.localeCompare(b.party);
+          return Math.abs(b.value) - Math.abs(a.value);
+        });
+
+        const headers = [
+          'Party (Seller)', 'PAN', 'Stock Item', 'HSN / SAC', 'Nature',
+          'Quantity', 'GST %', 'Value', '194Q Base (Goods)', 'Vouchers',
+        ];
+        const totalGoods = stockRows.filter((s) => s.nature === 'goods').reduce((s, x) => s + x.value, 0);
+        const totalService = stockRows.filter((s) => s.nature === 'service').reduce((s, x) => s + x.value, 0);
+        const aoa: any[][] = [
+          [`Party × Stock Item — 194Q Analysis (Primary: ${effectivePrimary || 'N/A'})`],
+          [`${stockRows.length} item-lines across ${filteredRows.length} parties. Goods = 194Q base; Service (SAC 99xx) excluded. Threshold ₹50L checked per PAN.`],
+          [''],
+          headers,
+        ];
+        stockRows.forEach((s) =>
+          aoa.push([
+            s.party, s.pan, s.item, s.hsn || '',
+            s.nature === 'goods' ? 'Goods' : 'Service',
+            s.qty, s.gstRate || '', s.value,
+            s.nature === 'goods' ? s.value : 0,
+            s.vch,
+          ]),
+        );
+        aoa.push(['TOTAL', '', '', '', '', '', '', totalGoods + totalService, totalGoods, '']);
+
+        const ws = XLSX.utils.aoa_to_sheet(aoa);
+        const lastCol = headers.length - 1;
+        ws['!cols'] = [
+          { wch: 30 }, { wch: 14 }, { wch: 40 }, { wch: 12 }, { wch: 10 },
+          { wch: 12 }, { wch: 8 }, { wch: 16 }, { wch: 18 }, { wch: 10 },
+        ];
+        ws['!merges'] = [
+          { s: { r: 0, c: 0 }, e: { r: 0, c: lastCol } },
+          { s: { r: 1, c: 0 }, e: { r: 1, c: lastCol } },
+        ];
+        ws['!freeze'] = { xSplit: 1, ySplit: 4 };
+        ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 3, c: 0 }, e: { r: 3, c: lastCol } }) };
+        for (let c = 0; c <= lastCol; c++) paint(ws, 0, c, titleStyle);
+        for (let c = 0; c <= lastCol; c++) paint(ws, 1, c, metaStyle);
+        for (let c = 0; c <= lastCol; c++) paint(ws, 3, c, headerStyle('0F766E'));
+        const firstData = 4;
+        for (let i = 0; i < stockRows.length; i++) {
+          const r = firstData + i;
+          const s = stockRows[i];
+          paint(ws, r, 0, dataStyle(r, false, true));
+          paint(ws, r, 1, dataStyle(r, false));
+          paint(ws, r, 2, dataStyle(r, false));
+          paint(ws, r, 3, dataStyle(r, true));
+          const natStyle = dataStyle(r, false, true);
+          natStyle.font = { ...natStyle.font, color: { rgb: s.nature === 'goods' ? '065F46' : '9A3412' } };
+          natStyle.fill = { fgColor: { rgb: s.nature === 'goods' ? 'D1FAE5' : 'FFEDD5' } };
+          paint(ws, r, 4, natStyle);
+          paint(ws, r, 5, dataStyle(r, true, false, '#,##0.00'));
+          paint(ws, r, 6, dataStyle(r, true, false, '0"%"'));
+          paint(ws, r, 7, dataStyle(r, true, false, '#,##0.00'));
+          paint(ws, r, 8, dataStyle(r, true, true, '#,##0.00'));
+          paint(ws, r, 9, dataStyle(r, true, false, '#,##0'));
+        }
+        const totalRow = firstData + stockRows.length;
+        paint(ws, totalRow, 0, totalStyle(false));
+        for (let c = 1; c <= 6; c++) paint(ws, totalRow, c, totalStyle(true));
+        paint(ws, totalRow, 7, totalStyle(true, '#,##0.00'));
+        paint(ws, totalRow, 8, totalStyle(true, '#,##0.00'));
+        paint(ws, totalRow, 9, totalStyle(true));
+        XLSX.utils.book_append_sheet(wb, ws, 'Party x Stock Item');
+      }
+
+      // ═══════════════ Sheet: 194Q by PAN ═══════════════
+      // Threshold test aggregated per PAN (Q4). One row per PAN; excess over
+      // ₹50L and indicative 0.1% TDS surfaced for the auditor to action.
+      if (hasStock && analysis.pan194q.length > 0) {
+        const headers = [
+          'PAN', 'Ledger(s) under PAN', 'Goods Value (194Q Base)', 'Service Value (excl.)',
+          'Over ₹50L?', 'Excess over ₹50L', 'TDS @ 0.1% on Excess',
+        ];
+        const aoa: any[][] = [
+          ['194Q Threshold Assessment — per PAN'],
+          ['194Q applies to purchase of GOODS > ₹50,00,000 per seller PAN in a FY. TDS @ 0.1% on the value exceeding ₹50L (0.1% shown assumes PAN available; 5% if no PAN). Verify FY coverage of the data.'],
+          [''],
+          headers,
+        ];
+        analysis.pan194q.forEach((p) =>
+          aoa.push([
+            p.pan || '(no PAN)',
+            p.parties.join(' | '),
+            p.goodsValue,
+            p.serviceValue,
+            p.over50L ? 'YES' : 'No',
+            p.excessOver50L,
+            p.tds194qAt01pct,
+          ]),
+        );
+        const totG = analysis.pan194q.reduce((s, p) => s + p.goodsValue, 0);
+        const totExcess = analysis.pan194q.reduce((s, p) => s + p.excessOver50L, 0);
+        const totTds = analysis.pan194q.reduce((s, p) => s + p.tds194qAt01pct, 0);
+        aoa.push(['TOTAL', '', totG, '', '', totExcess, totTds]);
+
+        const ws = XLSX.utils.aoa_to_sheet(aoa);
+        const lastCol = headers.length - 1;
+        ws['!cols'] = [{ wch: 14 }, { wch: 44 }, { wch: 20 }, { wch: 18 }, { wch: 10 }, { wch: 18 }, { wch: 20 }];
+        ws['!merges'] = [
+          { s: { r: 0, c: 0 }, e: { r: 0, c: lastCol } },
+          { s: { r: 1, c: 0 }, e: { r: 1, c: lastCol } },
+        ];
+        ws['!freeze'] = { xSplit: 1, ySplit: 4 };
+        ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 3, c: 0 }, e: { r: 3, c: lastCol } }) };
+        for (let c = 0; c <= lastCol; c++) paint(ws, 0, c, titleStyle);
+        for (let c = 0; c <= lastCol; c++) paint(ws, 1, c, metaStyle);
+        for (let c = 0; c <= lastCol; c++) paint(ws, 3, c, headerStyle('0F766E'));
+        const firstData = 4;
+        for (let i = 0; i < analysis.pan194q.length; i++) {
+          const r = firstData + i;
+          const p = analysis.pan194q[i];
+          paint(ws, r, 0, dataStyle(r, false, true));
+          paint(ws, r, 1, dataStyle(r, false));
+          const goodsStyle = dataStyle(r, true, true, '#,##0.00');
+          if (p.over50L) {
+            goodsStyle.fill = { fgColor: { rgb: 'FEE2E2' } };
+            goodsStyle.font = { ...goodsStyle.font, color: { rgb: '9F1239' }, bold: true };
+          }
+          paint(ws, r, 2, goodsStyle);
+          paint(ws, r, 3, dataStyle(r, true, false, '#,##0.00'));
+          const flagStyle = dataStyle(r, false, true);
+          if (p.over50L) {
+            flagStyle.fill = { fgColor: { rgb: 'FEE2E2' } };
+            flagStyle.font = { ...flagStyle.font, color: { rgb: '9F1239' }, bold: true };
+          }
+          paint(ws, r, 4, flagStyle);
+          paint(ws, r, 5, dataStyle(r, true, false, '#,##0.00'));
+          paint(ws, r, 6, dataStyle(r, true, true, '#,##0.00'));
+        }
+        const totalRow = firstData + analysis.pan194q.length;
+        paint(ws, totalRow, 0, totalStyle(false));
+        paint(ws, totalRow, 1, totalStyle(false));
+        paint(ws, totalRow, 2, totalStyle(true, '#,##0.00'));
+        paint(ws, totalRow, 3, totalStyle(false));
+        paint(ws, totalRow, 4, totalStyle(false));
+        paint(ws, totalRow, 5, totalStyle(true, '#,##0.00'));
+        paint(ws, totalRow, 6, totalStyle(true, '#,##0.00'));
+        XLSX.utils.book_append_sheet(wb, ws, '194Q by PAN');
       }
 
       // ═══════════════ Sheet 4: Anomalies ═══════════════
@@ -2393,6 +2637,94 @@ const PartyLedgerMatrix: React.FC<Props> = ({ data, externalProfile, onProfileUp
                                 <span className="text-[11px] text-slate-400 italic self-center">
                                   + {r.counterLedgers.length - 30} more (see Excel export)
                                 </span>
+                              )}
+                            </div>
+                          )}
+                          {/* ── Stock-item (194Q) breakdown ────────────────────
+                              Item-wise view of what this party actually supplied
+                              (trn_inventory ⋈ voucher). Goods drive the 194Q base;
+                              services (SAC 99xx) are shown but excluded. */}
+                          {hasStock && r.stockItems.length > 0 && (
+                            <div className="mt-3 pt-3 border-t border-slate-200 space-y-2">
+                              <div className="flex flex-wrap gap-3 items-center">
+                                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                  Stock Items (194Q)
+                                </span>
+                                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
+                                  Goods (194Q base): <span className="font-mono tabular-nums">{fmt(r.goodsValue)}</span>
+                                </span>
+                                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-orange-700">
+                                  Service (excl.): <span className="font-mono tabular-nums">{fmt(r.serviceValue)}</span>
+                                </span>
+                                {(() => {
+                                  const meta = partyMasterByName.get(r.partyName.trim().toLowerCase());
+                                  const pan = r.panKey || meta?.pan || '';
+                                  const over = Math.abs(r.goodsValue) >= 5000000;
+                                  return (
+                                    <span
+                                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-bold border ${
+                                        over
+                                          ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                          : 'bg-slate-50 text-slate-500 border-slate-200'
+                                      }`}
+                                      title={pan ? `PAN ${pan} — 194Q threshold checked per PAN` : '194Q ₹50L threshold'}
+                                    >
+                                      {over ? '⚠ Over ₹50L (194Q)' : 'Under ₹50L'}
+                                      {pan ? ` · PAN ${pan}` : ''}
+                                    </span>
+                                  );
+                                })()}
+                              </div>
+                              <div className="overflow-x-auto">
+                                <table className="w-full text-[11px] border border-slate-200 rounded-lg overflow-hidden">
+                                  <thead className="bg-slate-100 text-slate-600 uppercase tracking-wide text-[10px]">
+                                    <tr>
+                                      <th className="px-2 py-1 text-left">Stock Item</th>
+                                      <th className="px-2 py-1 text-center">HSN / SAC</th>
+                                      <th className="px-2 py-1 text-center">Nature</th>
+                                      <th className="px-2 py-1 text-right">Qty</th>
+                                      <th className="px-2 py-1 text-right">GST %</th>
+                                      <th className="px-2 py-1 text-right">Value</th>
+                                      <th className="px-2 py-1 text-right">Vch</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {r.stockItems.slice(0, 40).map((si: StockItemStat) => (
+                                      <tr key={si.item} className="border-t border-slate-100">
+                                        <td className="px-2 py-1 font-medium text-slate-800">
+                                          <span className="block truncate max-w-[280px]" title={si.item}>{si.item}</span>
+                                        </td>
+                                        <td className="px-2 py-1 text-center font-mono text-slate-500">{si.hsn || '—'}</td>
+                                        <td className="px-2 py-1 text-center">
+                                          <span
+                                            className={`inline-block px-1.5 py-0.5 rounded text-[9.5px] font-bold ${
+                                              si.nature === 'goods'
+                                                ? 'bg-emerald-100 text-emerald-800'
+                                                : 'bg-orange-100 text-orange-800'
+                                            }`}
+                                          >
+                                            {si.nature === 'goods' ? 'Goods' : 'Service'}
+                                          </span>
+                                        </td>
+                                        <td className="px-2 py-1 text-right tabular-nums text-slate-600">
+                                          {si.quantity.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                                        </td>
+                                        <td className="px-2 py-1 text-right tabular-nums text-slate-600">
+                                          {si.gstRate ? `${si.gstRate}%` : '—'}
+                                        </td>
+                                        <td className="px-2 py-1 text-right font-mono tabular-nums font-semibold text-slate-800" title={fullMoney(si.value)}>
+                                          {fmt(si.value)}
+                                        </td>
+                                        <td className="px-2 py-1 text-right tabular-nums text-slate-400">{si.voucherCount}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                              {r.stockItems.length > 40 && (
+                                <p className="text-[10px] text-slate-400 italic">
+                                  + {r.stockItems.length - 40} more items (see Excel export)
+                                </p>
                               )}
                             </div>
                           )}
