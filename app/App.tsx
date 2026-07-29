@@ -65,6 +65,7 @@ const LedgerVoucherView = lazy(() => import('./components/modules/LedgerVoucherV
 const CashFlowAnalysis = lazy(() => import('./components/modules/CashFlowAnalysis'));
 const ProfitLossAnalysis = lazy(() => import('./components/modules/ProfitLossAnalysis'));
 const BalanceSheetAnalysis = lazy(() => import('./components/modules/BalanceSheetAnalysis'));
+const GstReturnsSummary = lazy(() => import('./components/modules/GstReturnsSummary'));
 const ExceptionDensityHeatmapAnalytics = lazy(() => import('./components/modules/ExceptionDensityHeatmapAnalytics'));
 const BalanceSheetCleanlinessAnalytics = lazy(() => import('./components/modules/BalanceSheetCleanlinessAnalytics'));
 const ITC3BReconciliation = lazy(() => import('./components/modules/ITC3BReconciliation'));
@@ -82,6 +83,7 @@ const MODULE_LABELS: Record<AnalysisType, string> = {
   [AnalysisType.SALES_REGISTER]: 'Sales Register',
   [AnalysisType.PURCHASE_GST_REGISTER]: 'Purchase GST Register',
   [AnalysisType.GSTR2B_RECONCILIATION]: 'GSTR-2B Reconciliation',
+  [AnalysisType.GST_RETURNS_SUMMARY]: 'GST Returns Summary (R1 / 3B / 2B)',
   [AnalysisType.TDS_ANALYSIS]: 'TDS Analysis',
   [AnalysisType.RCM_ANALYSIS]: 'Reverse Charge (RCM) Analysis',
   [AnalysisType.GST_EXPENSE_ANALYSIS]: 'Blocked Credit Analysis',
@@ -113,6 +115,7 @@ const MODULE_ICONS: Record<AnalysisType, ModuleIcon> = {
   [AnalysisType.SALES_REGISTER]: FileText,
   [AnalysisType.PURCHASE_GST_REGISTER]: FileText,
   [AnalysisType.GSTR2B_RECONCILIATION]: FileSearch,
+  [AnalysisType.GST_RETURNS_SUMMARY]: FileSpreadsheet,
   [AnalysisType.TDS_ANALYSIS]: FileSpreadsheet,
   [AnalysisType.RCM_ANALYSIS]: FileInput,
   [AnalysisType.GST_EXPENSE_ANALYSIS]: Ban,
@@ -166,6 +169,7 @@ const MODULE_SECTIONS: Array<{ id: string; title: string; description: string; m
       AnalysisType.SALES_REGISTER,
       AnalysisType.PURCHASE_GST_REGISTER,
       AnalysisType.GSTR2B_RECONCILIATION,
+      AnalysisType.GST_RETURNS_SUMMARY,
       AnalysisType.ITC_3B_RECONCILIATION,
       AnalysisType.GST_LEDGER_SUMMARY,
       AnalysisType.TDS_ANALYSIS,
@@ -754,6 +758,7 @@ const App: React.FC = () => {
               )}
               {activeModule === AnalysisType.PROFIT_LOSS_ANALYSIS && <ProfitLossAnalysis data={transactionData} />}
               {activeModule === AnalysisType.BALANCE_SHEET && <BalanceSheetAnalysis />}
+              {activeModule === AnalysisType.GST_RETURNS_SUMMARY && <GstReturnsSummary />}
               {activeModule === AnalysisType.CASH_FLOW_ANALYSIS && <CashFlowAnalysis data={transactionData} />}
               {activeModule === AnalysisType.VARIANCE_ANALYSIS && <VarianceAnalysis data={transactionData} />}
               {activeModule === AnalysisType.EXCEPTION_DENSITY_HEATMAP && (
