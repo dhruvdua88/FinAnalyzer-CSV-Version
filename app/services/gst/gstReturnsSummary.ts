@@ -84,18 +84,19 @@ export const buildGstSummary = (d: GstDataset): GstSummaryModel => {
           r1: a, b3: b, b2: c,
         };
         if (c && b) {
+          // Net of credit notes on the 2B side — that is what Table 4(C) is comparable with.
           const diff: TaxHeads = {
-            igst: c.bucketTotals.itcavl.igst - b.itcNet.igst,
-            cgst: c.bucketTotals.itcavl.cgst - b.itcNet.cgst,
-            sgst: c.bucketTotals.itcavl.sgst - b.itcNet.sgst,
-            cess: c.bucketTotals.itcavl.cess - b.itcNet.cess,
+            igst: c.itcAvailableNet.igst - b.itcNet.igst,
+            cgst: c.itcAvailableNet.cgst - b.itcNet.cgst,
+            sgst: c.itcAvailableNet.sgst - b.itcNet.sgst,
+            cess: c.itcAvailableNet.cess - b.itcNet.cess,
           };
           row.itcCompare = {
-            b2: c.bucketTotals.itcavl, b3: b.itcNet, diff,
+            b2: c.itcAvailableNet, b3: b.itcNet, diff,
             status: (Object.values(diff) as number[]).every((v) => Math.abs(v) <= TOL) ? 'match' : 'mismatch',
           };
         } else if (c) {
-          row.itcCompare = { b2: c.bucketTotals.itcavl, b3: zeroTax(), diff: zeroTax(), status: '2b-only' };
+          row.itcCompare = { b2: c.itcAvailableNet, b3: zeroTax(), diff: zeroTax(), status: '2b-only' };
         } else if (b) {
           row.itcCompare = { b2: zeroTax(), b3: b.itcNet, diff: zeroTax(), status: '3b-only' };
         }
