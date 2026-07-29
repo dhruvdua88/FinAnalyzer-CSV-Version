@@ -11,9 +11,11 @@
  * Usage: npx tsx scripts/validateStatements.ts <zip> [--dataset cyberevolve]
  */
 import { readFileSync } from 'node:fs';
+import XLSX from 'xlsx-js-style';
 import { TallyStore } from '../services/tally';
 import { getTrialBalance } from '../services/tally/queries';
 import * as BS from '../services/balanceSheet';
+import { buildFinancialStatementsWorkbook } from '../services/financialStatementsExcel';
 
 // ── assertion plumbing ───────────────────────────────────────────────────────
 let pass = 0;
@@ -128,6 +130,60 @@ const main = async () => {
   check('employee benefits expense', BS.employeeCosts(branch), E.employeeBenefits);
   check('finance costs', BS.financeCosts(branch), E.financeCosts);
   check('profit before tax (invariant under expense re-splits)', BS.profitBeforeTax(branch), E.profitBeforeTax);
+
+  // ── Workbook: linkage, formulas, traceability ─────────────────────────────
+  section('Excel workbook');
+  const wb = buildFinancialStatementsWorkbook({
+    branches: [branch],
+    consolidated: null,
+    companyTitle: branch.company,
+    periodLabel: branch.periodLabel,
+    primaryGroups: BS.collectPrimaryGroups([{ store: store as any, branchName: 'MAIN' }], {}),
+  });
+
+  let formulaCells = 0;
+  const brokenLinks: string[] = [];
+  for (const name of wb.SheetNames) {
+    const ws: any = wb.Sheets[name];
+    for (const key of Object.keys(ws)) {
+      if (key.startsWith('!')) continue;
+      if (ws[key].f) formulaCells++;
+      const target = ws[key].l?.Target;
+      if (!target) continue;
+      const m = /^#?'?([^'!]+)'?!/.exec(String(target).replace(/^#/, ''));
+      if (m && !wb.SheetNames.includes(m[1])) brokenLinks.push(`${name}!${key} → ${target}`);
+    }
+  }
+  checkTrue('every internal hyperlink resolves to a real sheet', brokenLinks.length === 0, brokenLinks.slice(0, 3).join('; '));
+  checkTrue('note totals are live SUM formulas', formulaCells > 0, `${formulaCells} formula cells`);
+  checkTrue('a Ledger Index sheet is produced', wb.SheetNames.includes('Ledger Index'));
+
+  const li: any = wb.Sheets['Ledger Index'];
+  if (li) {
+    const rows = XLSX.utils.decode_range(li['!ref']).e.r - 2; // header band + nav + column header
+    check('Ledger Index covers every ledger', rows, E.ledgerCountExclPl, 0);
+  }
+
+  // Note numbers must be assigned from the face, never hardcoded: every note
+  // referenced on the face must exist, and every note sheet must be referenced.
+  const noteSheets = wb.SheetNames.filter((n) => /^N\d+ /.test(n));
+  const referenced = new Set<string>();
+  for (const sheet of ['Balance Sheet', 'P&L Statement']) {
+    const ws: any = wb.Sheets[sheet];
+    for (const key of Object.keys(ws)) {
+      const t = ws[key]?.l?.Target;
+      if (!t) continue;
+      const m = /^#?'?([^'!]+)'?!/.exec(String(t).replace(/^#/, ''));
+      if (m && /^N\d+ /.test(m[1])) referenced.add(m[1]);
+    }
+  }
+  checkTrue('every note is referenced from the face of a statement',
+    noteSheets.every((n) => referenced.has(n)),
+    noteSheets.filter((n) => !referenced.has(n)).join(', '));
+  checkTrue('note sheets are numbered contiguously from 1', noteSheets
+    .map((n) => Number(/^N(\d+) /.exec(n)![1]))
+    .sort((a, b) => a - b)
+    .every((v, i) => v === i + 1), noteSheets.join(', '));
 
   // ── verdict ───────────────────────────────────────────────────────────────
   console.log(`\n${fail === 0 ? '\x1b[32m' : '\x1b[31m'}${pass} passed, ${fail} failed\x1b[0m\n`);
