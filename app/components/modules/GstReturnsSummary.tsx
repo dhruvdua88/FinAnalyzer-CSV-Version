@@ -4,7 +4,8 @@ import { AlertTriangle, Download, FileSpreadsheet, Loader2, Trash2, Upload } fro
 import { ingestGstFiles, monthLabel, totalTax } from '../../services/gst/gstReturnsIngest';
 import type { GstDataset } from '../../services/gst/gstReturnsIngest';
 import { buildGstSummary, coverageLabel } from '../../services/gst/gstReturnsSummary';
-import { buildGstSummaryWorkbook } from '../../services/gst/gstReturnsExcel';
+import { buildGstSummaryWorkbook, gstSheetPolish } from '../../services/gst/gstReturnsExcel';
+import { downloadPolished, polishXlsx } from '../../services/xlsxPolish';
 
 interface Source { id: string; name: string; bytes: ArrayBuffer }
 
@@ -59,12 +60,16 @@ const GstReturnsSummary: React.FC = () => {
 
   const model = useMemo(() => (dataset ? buildGstSummary(dataset) : null), [dataset]);
 
-  const exportExcel = () => {
+  const exportExcel = async () => {
     if (!model) return;
     const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    XLSX.writeFile(buildGstSummaryWorkbook(model),
-      `GST_Returns_Summary_${model.gstin ?? 'unknown'}_${stamp}.xlsx`,
-      { compression: true, cellStyles: true });
+    const raw = XLSX.write(buildGstSummaryWorkbook(model),
+      { type: 'array', bookType: 'xlsx', cellStyles: true }) as ArrayBuffer;
+    // Freeze panes, gridlines and page setup are spliced in after the write —
+    // xlsx-js-style accepts them and then drops them.
+    const polished = await polishXlsx(raw, gstSheetPolish(model),
+      { showGridLines: false, landscape: true, fitToWidth: true });
+    downloadPolished(polished, `GST_Returns_Summary_${model.gstin ?? 'unknown'}_${stamp}.xlsx`);
   };
 
   const yieldFor = (name: string): { text: string; bad: boolean } => {

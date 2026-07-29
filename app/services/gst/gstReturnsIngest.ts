@@ -158,7 +158,18 @@ export interface Gstr2bPeriod {
   filed: true;
   gendt?: string;
   rows: Gstr2bSummRow[];
+  /** Gross sum per bucket, as the rows read. Kept for the detail sheet. */
   bucketTotals: Record<B2Bucket, ValueWithTax>;
+  /**
+   * ITC available NET of credit notes — the figure comparable with GSTR-3B Table 4(C).
+   * Credit notes reduce credit, so the `othersup` group (GSTR-2B's ITC-reversal bucket)
+   * is subtracted while every other group is added.
+   */
+  itcAvailableNet: ValueWithTax;
+  /** Credit available BEFORE deducting credit notes, so gross − reversal = net. */
+  itcAvailableGross: ValueWithTax;
+  /** Credit notes reducing the available credit, shown separately so the netting is visible. */
+  itcReversal: ValueWithTax;
   docCounts: { b2bAvl: number; b2bUnavl: number; cdnr: number; isd: number; impg: number; impgsez: number; other: number };
   unavailReasons: Record<string, number>;
   imsStatuses: Record<string, number>;
@@ -586,10 +597,21 @@ const normaliseGstr2b = (j: any, sourceFiles: string[]): Gstr2bPeriod => {
   }
 
   const bucketTotals = Object.fromEntries(B2_BUCKETS.map((b) => [b, zeroValue()])) as Record<B2Bucket, ValueWithTax>;
-  // ponytail: additive including credit notes, which is how the portal's own summary
-  // presents it and what the comparison column needs. Section rows stay visible so a
-  // reviewer can see the composition; flip to signed only if a client case demands it.
   for (const r of rows) addInto(bucketTotals[r.bucket], r.total);
+
+  // Credit notes REDUCE input tax credit. In GSTR-2B they arrive in the `othersup`
+  // group, which is the statement's ITC-reversal bucket; every other group adds.
+  // Verified against the sample: netting this way makes five of six months tie to
+  // GSTR-3B Table 4(C) exactly, where adding everything produced differences that
+  // were purely an artefact of the sign.
+  const itcAvailableGross = zeroValue();
+  const itcReversal = zeroValue();
+  for (const r of rows) {
+    if (r.bucket !== 'itcavl') continue;
+    if (r.group === 'othersup') addInto(itcReversal, r.total);
+    else addInto(itcAvailableGross, r.total);
+  }
+  const itcAvailableNet = subValue(itcAvailableGross, itcReversal);
 
   // docdata is folded to counts and sums here — a large 2B must not be held per-document.
   const docCounts = { b2bAvl: 0, b2bUnavl: 0, cdnr: 0, isd: 0, impg: 0, impgsez: 0, other: 0 };
@@ -657,7 +679,7 @@ const normaliseGstr2b = (j: any, sourceFiles: string[]): Gstr2bPeriod => {
     fyStart, fy: fyLabel(fyStart), monthIndex: monthIndexOf(p.mm), quarter: quarterOf(p.mm),
     filed: true,
     gendt: typeof d.gendt === 'string' ? d.gendt : undefined,
-    rows, bucketTotals, docCounts, unavailReasons, imsStatuses,
+    rows, bucketTotals, itcAvailableGross, itcAvailableNet, itcReversal, docCounts, unavailReasons, imsStatuses,
     docdataTaxable, crossCheckOk, crossCheckDelta,
     warnings, sourceFiles,
   };

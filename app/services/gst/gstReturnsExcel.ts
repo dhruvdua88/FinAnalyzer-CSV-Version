@@ -38,11 +38,27 @@ const b3SheetName = (fy: GstFySummary): string => `3B ${fy.fyShort}`;
 const b2SheetName = (fy: GstFySummary): string => `2B ${fy.fyShort}`;
 const billsSheetName = (fy: GstFySummary): string => `Bills ${fy.fyShort}`;
 const cmpSheetName = (fy: GstFySummary): string => `R1 vs 3B ${fy.fyShort}`;
+const itcCmpSheetName = (fy: GstFySummary): string => `2B vs 3B ${fy.fyShort}`;
 
 const today = (): string => {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
   return `${p(d.getDate())}-${p(d.getMonth() + 1)}-${d.getFullYear()}`;
+};
+
+/** Freeze rows/columns per sheet, applied by polishXlsx after the file is written. */
+export const gstSheetPolish = (model: GstSummaryModel): Record<string, { freeze: { rows: number; cols: number } }> => {
+  const out: Record<string, { freeze: { rows: number; cols: number } }> = { Index: { freeze: { rows: 3, cols: 0 } } };
+  for (const fy of model.fys) {
+    out[summarySheetName(fy)] = { freeze: { rows: 3, cols: 1 } };
+    out[cmpSheetName(fy)] = { freeze: { rows: 5, cols: 1 } };
+    out[itcCmpSheetName(fy)] = { freeze: { rows: 6, cols: 1 } };
+    out[r1SheetName(fy)] = { freeze: { rows: 5, cols: 1 } };
+    out[billsSheetName(fy)] = { freeze: { rows: 5, cols: 1 } };
+    out[b3SheetName(fy)] = { freeze: { rows: 5, cols: 1 } };
+    out[b2SheetName(fy)] = { freeze: { rows: 4, cols: 1 } };
+  }
+  return out;
 };
 
 export const buildGstSummaryWorkbook = (model: GstSummaryModel): XLSX.WorkBook => {
@@ -51,12 +67,55 @@ export const buildGstSummaryWorkbook = (model: GstSummaryModel): XLSX.WorkBook =
   for (const fy of model.fys) {
     buildFySummary(wb, model, fy);
     buildOutwardComparison(wb, model, fy);
+    buildItcComparison(wb, model, fy);
     buildR1Detail(wb, model, fy);
     buildR1Bills(wb, model, fy);
     buildB3Detail(wb, model, fy);
     buildB2Detail(wb, model, fy);
   }
+  finishWorkbook(wb, model);
   return wb;
+};
+
+/**
+ * Presentation applied once to every sheet rather than repeated per builder:
+ * document properties, gridlines off so the sheets read as statements, and print
+ * setup that actually produces a usable page (landscape, fit to one page wide,
+ * header rows repeated on every printed page).
+ */
+const finishWorkbook = (wb: XLSX.WorkBook, model: GstSummaryModel): void => {
+  wb.Props = {
+    Title: `GST returns summary — ${model.gstin ?? 'unknown GSTIN'}`,
+    Subject: 'GSTR-1 / IFF, GSTR-3B and GSTR-2B summary and comparisons',
+    Author: 'FinAnalyzer',
+    CreatedDate: new Date(),
+  };
+  wb.Workbook = wb.Workbook ?? {};
+  wb.Workbook.Views = [{ RTL: false }];
+  (wb.Workbook as any).Names = (wb.Workbook as any).Names ?? [];
+
+  for (const name of wb.SheetNames) {
+    const ws: any = wb.Sheets[name];
+    if (!ws) continue;
+    // Margins and print titles ARE written by the library; gridlines, page setup
+    // and freeze panes are not, and are spliced in afterwards by polishXlsx().
+    ws['!margins'] = { left: 0.4, right: 0.4, top: 0.6, bottom: 0.6, header: 0.3, footer: 0.3 };
+    // Repeat the top rows on every printed page.
+    const ref = ws['!ref'];
+    if (ref) {
+      const range = XLSX.utils.decode_range(ref);
+      (wb.Workbook as any).Names.push({
+        Name: '_xlnm.Print_Titles',
+        Ref: `'${name}'!$1:$4`,
+        Sheet: wb.SheetNames.indexOf(name),
+      });
+      (wb.Workbook as any).Names.push({
+        Name: '_xlnm.Print_Area',
+        Ref: `'${name}'!$A$1:${XLSX.utils.encode_col(range.e.c)}$${range.e.r + 1}`,
+        Sheet: wb.SheetNames.indexOf(name),
+      });
+    }
+  }
 };
 
 // ─── Index ───────────────────────────────────────────────────────────────────
@@ -127,6 +186,7 @@ const buildIndex = (wb: XLSX.WorkBook, model: GstSummaryModel): void => {
     for (const [label, name] of [
       [`${fy.fy} — summary and comparisons`, summarySheetName(fy)],
       [`${fy.fy} — GSTR-1 vs GSTR-3B`, cmpSheetName(fy)],
+      [`${fy.fy} — GSTR-2B vs GSTR-3B (input tax credit)`, itcCmpSheetName(fy)],
       [`${fy.fy} — GSTR-1 detail`, r1SheetName(fy)],
       [`${fy.fy} — GSTR-1 bill-wise`, billsSheetName(fy)],
       [`${fy.fy} — GSTR-3B detail`, b3SheetName(fy)],
@@ -336,6 +396,120 @@ const buildFySummary = (wb: XLSX.WorkBook, model: GstSummaryModel, fy: GstFySumm
 
   s.freeze = { r: 3, c: 1 };
   XLSX.utils.book_append_sheet(wb, s.toWS(), summarySheetName(fy));
+};
+
+// ─── GSTR-2B vs GSTR-3B, input tax credit ────────────────────────────────────
+//
+// The netting is shown on the face rather than buried: credit notes reduce credit,
+// so the ITC-reversal column is subtracted to reach the figure that is comparable
+// with GSTR-3B Table 4(C). A reviewer can follow every step across the row.
+
+const buildItcComparison = (wb: XLSX.WorkBook, model: GstSummaryModel, fy: GstFySummary): void => {
+  const s = new Sheet();
+  const LAST = 9;
+  s.cols = [{ wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 },
+    { wch: 18 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 24 }];
+  let r = 0;
+  s.merge(r, 0, LAST);
+  s.set(r, 0, `${model.gstin ?? ''} — input tax credit: GSTR-2B vs GSTR-3B — ${fy.fy}`,
+    { s: titleBandStyle(12), num: false });
+  r++;
+  s.merge(r, 0, LAST);
+  s.set(r, 0, 'Credit notes reduce input tax credit, so they are subtracted from the credit available '
+    + 'in GSTR-2B before the comparison. The columns below show that netting step by step.',
+    { s: subBandStyle(undefined, true), num: false });
+  r++;
+  s.set(r, 0, '← Index', { s: linkStyle(ALIGN.left), link: internalLink(INDEX_SHEET, 'A1', 'Index'), num: false });
+  s.set(r, 1, 'GSTR-2B detail →', { s: linkStyle(ALIGN.left), link: internalLink(b2SheetName(fy), 'A1', 'GSTR-2B detail'), num: false });
+  r += 2;
+
+  const HEADS: Array<[string, keyof TaxHeads]> = [['IGST', 'igst'], ['CGST', 'cgst'], ['SGST/UTGST', 'sgst'], ['Cess', 'cess']];
+
+  for (const [headLabel, head] of HEADS) {
+    const rowsWithData = fy.months.filter((m) => m.b2 || m.b3);
+    if (!rowsWithData.some((m) => (m.b2 && (m.b2.itcAvailableGross[head] !== 0 || m.b2.itcReversal[head] !== 0))
+      || (m.b3 && m.b3.itcNet[head] !== 0))) continue;
+
+    s.merge(r, 0, LAST);
+    s.set(r, 0, headLabel, { s: sectionHeaderStyle(), num: false });
+    r++;
+    ['Month', 'Credit available (gross)', 'Less: credit notes', 'Credit available (net)',
+      'GSTR-3B Table 4(C)', 'Difference', 'ITC not available', 'Reversal (rule 37A)',
+      'Rejected in IMS', 'Status'].forEach((h, c) =>
+        s.set(r, c, h, { s: columnHeaderStyle(c === 0 ? ALIGN.left : ALIGN.center), num: false }));
+    const headerRow = r;
+    r++;
+    const start = r;
+    const used: number[] = [];
+    const t = { gross: 0, rev: 0, net: 0, b3: 0, unavl: 0, r37: 0, rej: 0 };
+
+    for (const m of fy.months) {
+      if (!m.b2 && !m.b3) continue;
+      s.set(r, 0, m.label, { s: labelStyle(), num: false });
+      if (m.b2) {
+        const gross = m.b2.itcAvailableGross[head];
+        const rev = m.b2.itcReversal[head];
+        s.set(r, 1, gross, { s: numberStyle(Z), num: true });
+        s.set(r, 2, rev, { s: numberStyle(Z), num: true });
+        // Net is a formula so the subtraction is visible and stays live.
+        s.setFormula(r, 3, `B${r + 1}-C${r + 1}`, gross - rev, subtotalNumberStyle(Z));
+        s.set(r, 6, m.b2.bucketTotals.itcunavl[head], { s: numberStyle(Z), num: true });
+        s.set(r, 7, m.b2.bucketTotals.itcrev[head], { s: numberStyle(Z), num: true });
+        s.set(r, 8, m.b2.bucketTotals.itcRejected[head], { s: numberStyle(Z), num: true });
+        t.gross += gross; t.rev += rev; t.net += gross - rev;
+        t.unavl += m.b2.bucketTotals.itcunavl[head];
+        t.r37 += m.b2.bucketTotals.itcrev[head];
+        t.rej += m.b2.bucketTotals.itcRejected[head];
+      } else {
+        s.merge(r, 1, 3);
+        s.set(r, 1, 'GSTR-2B not supplied', { s: { ...mutedLabel(), alignment: ALIGN.center }, num: false });
+      }
+      if (m.b3) {
+        s.set(r, 4, m.b3.itcNet[head], { s: numberStyle(Z), num: true });
+        t.b3 += m.b3.itcNet[head];
+      } else {
+        s.set(r, 4, 'Not supplied', { s: { ...mutedLabel(), alignment: ALIGN.center }, num: false });
+      }
+      if (m.b2 && m.b3) {
+        const d = m.b2.itcAvailableNet[head] - m.b3.itcNet[head];
+        s.setFormula(r, 5, `D${r + 1}-E${r + 1}`, d, diffStyle(isBig(d)));
+        s.set(r, 9, Math.abs(d) <= 0.5 ? 'Agrees' : 'Difference — review', {
+          s: Math.abs(d) <= 0.5 ? labelStyle() : { ...labelStyle(), font: font({ bold: true, color: PALETTE.error }) },
+          num: false,
+        });
+      } else {
+        s.set(r, 5, '—', { s: mutedLabel(), num: false });
+        s.set(r, 9, m.b2 ? 'No GSTR-3B' : 'No GSTR-2B', { s: mutedLabel(), num: false });
+      }
+      used.push(r); r++;
+    }
+    if (r > start) s.applyZebra(start, r - 1, 0, LAST);
+
+    s.set(r, 0, 'Total', { s: grandTotalLabelStyle(), num: false });
+    ([[1, t.gross], [2, t.rev], [4, t.b3], [6, t.unavl], [7, t.r37], [8, t.rej]] as Array<[number, number]>)
+      .forEach(([c, cached]) => {
+        const col = XLSX.utils.encode_col(c);
+        s.setFormula(r, c, `SUM(${used.map((x) => `${col}${x + 1}`).join(',')})`, cached, grandTotalNumberStyle(Z));
+      });
+    s.setFormula(r, 3, `B${r + 1}-C${r + 1}`, t.net, grandTotalNumberStyle(Z));
+    s.setFormula(r, 5, `D${r + 1}-E${r + 1}`, t.net - t.b3,
+      { ...grandTotalNumberStyle(Z), font: font({ bold: true, color: isBig(t.net - t.b3) ? PALETTE.error : PALETTE.text }) });
+    s.set(r, 9, '', { s: grandTotalLabelStyle(), num: false });
+    r += 2;
+    void headerRow;
+  }
+
+  s.merge(r, 0, LAST);
+  s.set(r, 0,
+    'Credit available (gross) is the ITC-available bucket of GSTR-2B before netting. Credit notes are '
+    + 'reported by the portal in the ITC-reversal group and are deducted to reach the net figure, which is '
+    + 'what GSTR-3B Table 4(C) claims. The last three columns are shown for completeness and are NOT part '
+    + 'of the comparison: credit marked unavailable in GSTR-2B, credit reversible under rule 37A where the '
+    + 'supplier has not filed, and documents rejected in the Invoice Management System.',
+    { s: mutedLabel(), num: false });
+
+  s.freeze = { r: 5, c: 1 };
+  XLSX.utils.book_append_sheet(wb, s.toWS(), itcCmpSheetName(fy));
 };
 
 // ─── GSTR-1 detail ───────────────────────────────────────────────────────────

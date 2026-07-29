@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import XLSX from 'xlsx-js-style';
 import { ingestGstFiles } from '../services/gst/gstReturnsIngest';
 import { buildGstSummary } from '../services/gst/gstReturnsSummary';
-import { buildGstSummaryWorkbook } from '../services/gst/gstReturnsExcel';
+import { buildGstSummaryWorkbook, gstSheetPolish } from '../services/gst/gstReturnsExcel';
+import { polishXlsx } from '../services/xlsxPolish';
 
 const walk = (d: string): string[] => readdirSync(d).flatMap((e) => {
   const p = join(d, e);
@@ -28,6 +29,12 @@ const main = async () => {
       console.log(`  ${row.basis.padEnd(7)} ${row.label.padEnd(14)} R1 ${(row.r1?.taxable ?? 0).toLocaleString('en-IN').padStart(16)}  3B ${(row.b3?.taxable ?? 0).toLocaleString('en-IN').padStart(16)}  Δ ${(row.diff?.taxable ?? 0).toLocaleString('en-IN').padStart(14)}  ${row.status}`);
     }
   }
-  if (out) { writeFileSync(out, XLSX.write(wb, { type: 'buffer', bookType: 'xlsx', cellStyles: true })); console.log('\nwrote', out); }
+  if (out) {
+    const raw = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx', cellStyles: true }) as Buffer;
+    const polished = await polishXlsx(new Uint8Array(raw), gstSheetPolish(model),
+      { showGridLines: false, landscape: true, fitToWidth: true });
+    writeFileSync(out, polished);
+    console.log('\nwrote', out);
+  }
 };
 main().catch((e) => { console.error(e); process.exit(1); });

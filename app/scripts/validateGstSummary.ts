@@ -187,13 +187,20 @@ const main = async () => {
   check('Mar 2026 difference', row('Mar 2026')?.diff?.taxable ?? NaN, 95000.00);
   checkEq('Jan 2026 has 3B but no GSTR-1', row('Jan 2026')?.status ?? '', '3b-only');
 
-  section('ITC comparison (2B vs 3B, both monthly)');
+  section('ITC comparison — credit notes netted off');
   const m = (p: string) => model.fys[0].months.find((x) => x.period === p)!;
-  check('Jan 2026 IGST difference', m('012026').itcCompare!.diff.igst, 0);
-  check('Jan 2026 CGST difference', m('012026').itcCompare!.diff.cgst, 0);
-  check('Sep 2025 IGST difference', m('092025').itcCompare!.diff.igst, 75932.64);
-  check('Jun 2025 IGST difference', m('062025').itcCompare!.diff.igst, 388.00);
-  check('Jun 2025 CGST difference', m('062025').itcCompare!.diff.cgst, 272.00);
+  // Credit notes reduce credit. Netting them makes five of the six months tie to
+  // GSTR-3B exactly; treating them additively manufactured differences.
+  for (const p of ['062025', '092025', '122025', '012026', '032026']) {
+    check(`${p} IGST difference`, m(p).itcCompare!.diff.igst, 0);
+    check(`${p} CGST difference`, m(p).itcCompare!.diff.cgst, 0);
+    checkEq(`${p} agrees with 3B`, m(p).itcCompare!.status, 'match');
+  }
+  check('Feb 2026 IGST difference (a real one)', m('022026').itcCompare!.diff.igst, 660.06);
+  check('Feb 2026 CGST difference (a real one)', m('022026').itcCompare!.diff.cgst, 284.00);
+  check('Jun 2025 credit notes netted off — IGST', ds.b2.find((x) => x.period === '062025')!.itcReversal.igst, 194.00);
+  check('Sep 2025 credit notes netted off — IGST', ds.b2.find((x) => x.period === '092025')!.itcReversal.igst, 37966.32);
+  check('Sep 2025 net credit available — IGST', ds.b2.find((x) => x.period === '092025')!.itcAvailableNet.igst, 594933.39);
 
   // ── Part 2: synthetic fixtures for what the sample cannot exercise ──────────
   const fixturesDir = process.argv[3];
