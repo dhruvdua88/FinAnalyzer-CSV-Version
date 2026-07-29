@@ -985,6 +985,8 @@ export interface TbLedgerRow extends TbDrCr {
   closingCalculated: number;     // opening + duringNet
   reconDelta: number;            // closingCalculated - closingSigned (master)
   reconPass: boolean;
+  /** Tally stores no closing for this ledger (P&L A/c); it is derived. */
+  synthesised: boolean;
   activity: TbActivity;
   pan: string;
   gstin: string;
@@ -1119,11 +1121,19 @@ export const getTrialBalance = (
     const movement = accByLedger.get(nameKey(ledger.name)) || { dr: 0, cr: 0 };
 
     const openingSigned = ledger.opening_balance || 0;
-    const closingSigned = ledger.closing_balance || 0;
-    const opening = splitSigned(openingSigned);
-    const closing = splitSigned(closingSigned);
     const duringNet = movement.cr - movement.dr;
     const closingCalculated = openingSigned + duringNet;
+
+    // Tally never stores a closing balance for the synthesised "Profit & Loss A/c"
+    // ledger — the master field is always 0 while the ledger really carries the
+    // contra of the year-end transfer. Taking the master figure there reports a
+    // reconciliation failure equal to the year's profit and makes the trial
+    // balance appear not to sum to zero. Derive it like every other ledger.
+    const synthesised = nameKey(ledger.name) === nameKey('Profit & Loss A/c');
+    const closingSigned = synthesised ? closingCalculated : ledger.closing_balance || 0;
+
+    const opening = splitSigned(openingSigned);
+    const closing = splitSigned(closingSigned);
     const reconDelta = closingCalculated - closingSigned;
 
     flatLedgers.push({
@@ -1139,6 +1149,7 @@ export const getTrialBalance = (
       closingCalculated,
       reconDelta,
       reconPass: Math.abs(reconDelta) <= tolerance,
+      synthesised,
       activity: classifyActivity(openingSigned, movement.dr, movement.cr, closingSigned, tolerance),
       pan: ledger.it_pan || '',
       gstin: ledger.gstn || '',

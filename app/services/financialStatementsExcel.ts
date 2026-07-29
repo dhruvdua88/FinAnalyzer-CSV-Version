@@ -15,7 +15,10 @@
 // with XLSX.writeFile (synchronous Blob+anchor) — see exportExcel docs at the
 // bottom of this file.
 
-import * as XLSX from 'xlsx-js-style';
+// Default import, not `import * as`: xlsx-js-style is CommonJS, and under Node
+// ESM a namespace import exposes no properties — which breaks the headless
+// validator. The default import works in both Vite and Node.
+import XLSX from 'xlsx-js-style';
 import { AgeingResult, BUCKET_LABELS } from './ageingFifo';
 import {
   BranchData,
@@ -30,7 +33,27 @@ import {
   deferredTaxLiability,
   depreciationFromFA,
   directExpenses,
-  dutiesAndTaxesNet,
+  dutiesTaxesPayable,
+  employeeDues,
+  advancesFromCustomers,
+  shortTermLoansAdvances,
+  cwipTotal,
+  intangibleAssets,
+  intangiblesUnderDevelopment,
+  tradePayablesMsme,
+  tradePayablesOther,
+  unclassifiedCr,
+  unclassifiedDr,
+  currentInvestments,
+  otherLongTermLiabilities,
+  longTermProvisions,
+  shareApplicationMoney,
+  depreciation,
+  ledgersForLine,
+  lineSum,
+  surplusTransfer,
+  LINE_BY_ID,
+  isPnlLine,
   employeeCosts,
   financeCosts,
   fixedAssetsSchedule,
@@ -75,7 +98,9 @@ import {
   PALETTE,
   SIZE,
   Style,
+  Sheet,
   columnHeaderStyle,
+  errorBandStyle,
   font,
   fill,
   grandTotalLabelStyle,
@@ -97,89 +122,13 @@ import {
 const BS_SHEET = 'Balance Sheet';
 const PL_SHEET = 'P&L Statement';
 const INDEX_SHEET = 'Notes Index';
+const LEDGER_INDEX_SHEET = 'Ledger Index';
 const MAP_SHEET = 'Group Mapping';
 
-const noteSheetName = (n: number): string =>
-  ({
-    1: 'N1 Share Capital',
-    2: 'N2 Reserves Surplus',
-    3: 'N3 LT Borrowings',
-    4: 'N4 ST Borrowings',
-    5: 'N5 Trade Payables',
-    6: 'N6 Other CL',
-    7: 'N7 Provisions',
-    8: 'N8 Fixed Assets',
-    9: 'N9 NC Investments',
-    10: 'N10 LT Loans',
-    11: 'N11 Inventories',
-    12: 'N12 Trade Receivables',
-    13: 'N13 Cash & Bank',
-    14: 'N14 Other CA',
-    15: 'N15 Revenue',
-    16: 'N16 Other Income',
-    17: 'N17 Purchases',
-    18: 'N18 Inventory Change',
-    19: 'N19 Employee Cost',
-    20: 'N20 Finance Costs',
-    21: 'N21 Depreciation',
-    22: 'N22 Other Expenses',
-  }[n] || `Note ${n}`);
+
 
 const labelFor = (l: BsLedger, multi: boolean): string => (multi && l.branch ? `[${l.branch}] ${l.name}` : l.name);
 const headFor = (primary: string): string => (primary in BS_MAP ? BS_MAP[primary][1] : 'Profit & Loss');
-
-// A lightweight cell-addressed sheet that converts to a SheetJS worksheet.
-interface CellOpt {
-  s?: Style;
-  z?: string;
-  link?: { Target: string; Tooltip?: string };
-  num?: boolean;
-}
-
-class Sheet {
-  private cells: Record<string, any> = {};
-  private maxR = 0;
-  private maxC = 0;
-  merges: any[] = [];
-  cols: Array<{ wch: number }> = [];
-  freeze?: { r: number; c: number };
-  autofilter?: string;
-
-  set(r: number, c: number, v: any, opt: CellOpt = {}): void {
-    const ref = XLSX.utils.encode_cell({ r, c });
-    const isNum = opt.num ?? typeof v === 'number';
-    const cell: any = { v, t: isNum ? 'n' : 's' };
-    if (opt.s) cell.s = opt.s;
-    // Mirror the style's numFmt onto cell.z so the value renders even in
-    // viewers that read .z rather than .s.numFmt.
-    const z = opt.z ?? (opt.s && opt.s.numFmt);
-    if (z) cell.z = z;
-    if (opt.link) cell.l = opt.link;
-    this.cells[ref] = cell;
-    if (r > this.maxR) this.maxR = r;
-    if (c > this.maxC) this.maxC = c;
-  }
-
-  merge(r: number, c1: number, c2: number): void {
-    this.merges.push({ s: { r, c: c1 }, e: { r, c: c2 } });
-    if (c2 > this.maxC) this.maxC = c2;
-  }
-
-  // Expose the raw cell store + encoder so excelStyles mutators (zebra) work.
-  applyZebra(startRow: number, endRow: number, firstCol: number, lastCol: number): void {
-    zebra(this.cells, (a) => XLSX.utils.encode_cell(a), startRow, endRow, firstCol, lastCol);
-  }
-
-  toWS(): XLSX.WorkSheet {
-    const ws: XLSX.WorkSheet = { ...this.cells };
-    ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: this.maxR, c: this.maxC } });
-    if (this.merges.length) ws['!merges'] = this.merges;
-    if (this.cols.length) ws['!cols'] = this.cols;
-    if (this.freeze) ws['!freeze'] = { xSplit: this.freeze.c, ySplit: this.freeze.r } as any;
-    if (this.autofilter) ws['!autofilter'] = { ref: this.autofilter };
-    return ws;
-  }
-}
 
 interface ColumnSpec {
   name: string;
@@ -221,6 +170,101 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
 
   const wb = XLSX.utils.book_new();
 
+  // ───────────────────── Note schedules (numbered from the face) ─────────────
+  //
+  // Notes are DERIVED from the statement, not hand-numbered. Each face line that
+  // has ledgers behind it gets a note; numbers are assigned in face order. So a
+  // reclassification moves the money, the note and the cross-reference together
+  // and the numbering can never go stale.
+
+  interface NoteSpec {
+    lineId: string;
+    title: string;
+    backTo: 'bs' | 'pl';
+    total: number;
+    /** Extra rows appended after the ledger listing (schedules, ageing, notes). */
+    enrich?: (s: Sheet, rr: number) => number;
+  }
+
+  const faceNotes: NoteSpec[] = [];
+  const addNote = (lineId: string, title: string, backTo: 'bs' | 'pl', enrich?: NoteSpec['enrich']) => {
+    const ls = ledgersForLine(totalCol, lineId);
+    const total = lineSum(totalCol, lineId);
+    // A note exists only where the face shows a line. Nil lines are omitted from
+    // the face, so emitting their notes would leave unreferenced note numbers.
+    if (Math.round(total) === 0 && !ls.some((l) => Math.round(l.closing) !== 0)) return;
+    faceNotes.push({ lineId, title, backTo, total, enrich });
+  };
+
+  // Declared in the order the lines appear on the face of each statement.
+  addNote('share_capital', 'Share Capital', 'bs');
+  addNote('reserves_surplus', 'Reserves & Surplus', 'bs', (s, rr) => {
+    // The surplus carried from the P&L is not a ledger, so it is stated here.
+    rr = noteRow(s, rr, 'Surplus in the Statement of Profit & Loss (net of transfers already booked)',
+      Math.round(surplusTransfer(totalCol)));
+    return rr;
+  });
+  addNote('share_application', 'Share Application Money Pending Allotment', 'bs');
+  addNote('lt_borrowings', 'Long-Term Borrowings', 'bs');
+  addNote('dtl', 'Deferred Tax Liabilities (Net)', 'bs');
+  addNote('other_lt_liab', 'Other Long-Term Liabilities', 'bs');
+  addNote('lt_provisions', 'Long-Term Provisions', 'bs');
+  addNote('st_borrowings', 'Short-Term Borrowings', 'bs');
+  addNote('trade_payables_msme', 'Trade Payables — Micro & Small Enterprises', 'bs', (s, rr) => {
+    rr = noteRow(s, rr, 'Tally masters carry no MSME flag; ledgers are included here only where '
+      + 'tagged by the preparer. Management to confirm MSMED Act status and disclose interest.', null, { bold: false });
+    return rr;
+  });
+  addNote('trade_payables_other', 'Trade Payables — Other than Micro & Small Enterprises', 'bs', (s, rr) =>
+    input.payablesAgeing ? renderAgeing(s, rr, input.payablesAgeing, 'Trade Payables') : rr);
+  addNote('duties_taxes_payable', 'Statutory Dues Payable', 'bs');
+  addNote('employee_dues', 'Employee Benefits Payable', 'bs');
+  addNote('advances_from_customers', 'Advances from Customers', 'bs');
+  addNote('other_current_liab', 'Other Current Liabilities', 'bs');
+  addNote('st_provisions', 'Short-Term Provisions', 'bs');
+  addNote('unclassified_cr', 'Unclassified — credit balances (REVIEW)', 'bs');
+  addNote('ppe', 'Property, Plant and Equipment', 'bs', (s, rr) => renderFaSchedule(s, rr));
+  addNote('intangibles', 'Intangible Assets', 'bs');
+  addNote('cwip', 'Capital Work-in-Progress', 'bs');
+  addNote('intangibles_dev', 'Intangible Assets under Development', 'bs');
+  addNote('nc_investments', 'Non-Current Investments', 'bs');
+  addNote('dta', 'Deferred Tax Assets (Net)', 'bs');
+  addNote('lt_loans_advances', 'Long-Term Loans & Advances', 'bs');
+  addNote('other_nc_assets', 'Other Non-Current Assets', 'bs');
+  addNote('c_investments', 'Current Investments', 'bs');
+  addNote('inventories', 'Inventories', 'bs');
+  addNote('trade_receivables', 'Trade Receivables', 'bs', (s, rr) =>
+    input.receivablesAgeing ? renderAgeing(s, rr, input.receivablesAgeing, 'Trade Receivables') : rr);
+  addNote('cash_bank', 'Cash & Cash Equivalents', 'bs');
+  addNote('st_loans_advances', 'Short-Term Loans & Advances', 'bs');
+  addNote('other_current_assets', 'Other Current Assets', 'bs');
+  addNote('unclassified_dr', 'Unclassified — debit balances (REVIEW)', 'bs');
+  // Statement of Profit & Loss
+  addNote('revenue_ops', 'Revenue from Operations', 'pl');
+  addNote('other_income', 'Other Income', 'pl');
+  addNote('purchases', 'Cost of Materials / Purchases', 'pl');
+  addNote('direct_expenses', 'Direct Expenses', 'pl');
+  addNote('employee_benefits', 'Employee Benefits Expense', 'pl');
+  addNote('finance_costs', 'Finance Costs', 'pl');
+  addNote('depreciation', 'Depreciation & Amortisation', 'pl', (s, rr) => {
+    const derived = fixedAssetsSchedule(totalCol).reduce((a, r) => a + r.deprCharge, 0);
+    const booked = lineSum(totalCol, 'depreciation');
+    if (Math.abs(derived - booked) > 1)
+      rr = noteRow(s, rr, `Movement in accumulated depreciation ledgers (for comparison): ${Math.round(derived).toLocaleString('en-IN')}`, null);
+    return rr;
+  });
+  addNote('other_expenses', 'Other Expenses', 'pl');
+
+  const noteNoByLineId = new Map<string, number>();
+  faceNotes.forEach((n, i) => noteNoByLineId.set(n.lineId, i + 1));
+
+  const shortTitle = (n: number, t: string): string => {
+    const base = `N${n} ${t}`.replace(/[\\/?*\[\]:]/g, '-');
+    return base.length <= 31 ? base : `${base.slice(0, 30)}…`;
+  };
+  const sheetNameFor = (n: NoteSpec): string => shortTitle(noteNoByLineId.get(n.lineId)!, n.title);
+
+
   // ───────────────────────── Balance Sheet ─────────────────────────
   const bs = new Sheet();
   bs.cols = [{ wch: 56 }, { wch: 7 }, ...columns.map(() => ({ wch: 22 }))];
@@ -243,17 +287,23 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   const headerRow = r;
   r++;
 
+  // Schedule III sub-items are lettered a), b), c)... Nil lines are omitted, so
+  // the letters are assigned as rows are actually emitted rather than hardcoded
+  // — otherwise a hidden line leaves a gap like "c) d) g)".
+  let subItem = 0;
   const subheader = (s: Sheet, text: string) => {
     s.merge(r, 0, lastCol);
     s.set(r, 0, text, { s: sectionHeaderStyle(), num: false });
     r++;
+    subItem = 0;
   };
+  const letter = (): string => String.fromCharCode(97 + subItem++);
 
   type Fn = (b: BranchData) => number;
   const line = (
     label: string,
     fn: Fn | null,
-    opts: { note?: number; bold?: boolean; total?: boolean; grand?: boolean; muted?: boolean; italic?: boolean } = {},
+    opts: { lineId?: string; bold?: boolean; total?: boolean; grand?: boolean; muted?: boolean; italic?: boolean } = {},
   ) => {
     // Hide nil line items (every column rounds to zero) — keep subtotals/totals.
     if (fn && !opts.total && !opts.grand && columns.every((c) => Math.round(fn(c.data)) === 0)) return;
@@ -262,11 +312,14 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
       : opts.total
       ? subtotalLabelStyle()
       : labelStyle({ bold: opts.bold, italic: opts.italic, muted: opts.muted });
-    bs.set(r, 0, label, { s: lblStyle, num: false });
-    if (opts.note) {
-      bs.set(r, 1, opts.note, {
+    const text = label.startsWith('@ ') ? `  ${letter()})  ${label.slice(2)}` : label;
+    bs.set(r, 0, text, { s: lblStyle, num: false });
+    const noteNo = opts.lineId ? noteNoByLineId.get(opts.lineId) : undefined;
+    if (noteNo) {
+      const spec = faceNotes.find((n) => n.lineId === opts.lineId)!;
+      bs.set(r, 1, noteNo, {
         s: linkStyle(ALIGN.center),
-        link: internalLink(noteSheetName(opts.note), 'A1', `Note ${opts.note}`),
+        link: internalLink(sheetNameFor(spec), 'A1', `Note ${noteNo}`),
         num: true,
       });
     }
@@ -284,47 +337,75 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   };
   const spacer = () => { r++; };
 
+  // A Schedule III balance sheet carries no balancing figure. If the statement
+  // does not close on its own arithmetic, say so loudly instead of hiding it in
+  // a plug line.
+  const outOfBalance = columns.filter((c) => Math.abs(bsReconciliation(c.data)) > 0.5);
+  if (outOfBalance.length > 0) {
+    const detail = outOfBalance
+      .map((c) => `${c.name}: ${Math.round(bsReconciliation(c.data)).toLocaleString('en-IN')}`)
+      .join('   |   ');
+    bs.merge(r, 0, lastCol);
+    bs.set(
+      r,
+      0,
+      `⚠  DOES NOT BALANCE — Assets − Equity & Liabilities ≠ 0   (${detail}).  ` +
+        `Review ledger classification and excluded groups before issuing this statement.`,
+      { s: errorBandStyle(), num: false },
+    );
+    r += 2;
+  }
+
   subheader(bs, "I.  SHAREHOLDERS' FUNDS");
-  line('  a)  Share Capital', shareCapital, { note: 1 });
-  line('  b)  Reserves & Surplus', reservesSurplus, { note: 2 });
+  line('@ Share Capital', shareCapital, { lineId: 'share_capital' });
+  line('@ Reserves & Surplus', reservesSurplus, { lineId: 'reserves_surplus' });
+  line('@ Share Application Money Pending Allotment', shareApplicationMoney, { lineId: 'share_application' });
   line('Total Shareholders’ Funds', totalEquity, { total: true });
   spacer();
   subheader(bs, 'II.  NON-CURRENT LIABILITIES');
-  line('  a)  Long-Term Borrowings', longTermBorrowings, { note: 3 });
-  line('  b)  Deferred Tax Liability', deferredTaxLiability);
+  line('@ Long-Term Borrowings', longTermBorrowings, { lineId: 'lt_borrowings' });
+  line('@ Deferred Tax Liability', deferredTaxLiability, { lineId: 'dtl' });
+  line('@ Other Long-Term Liabilities', otherLongTermLiabilities, { lineId: 'other_lt_liab' });
+  line('@ Long-Term Provisions', longTermProvisions, { lineId: 'lt_provisions' });
   line('Total Non-Current Liabilities', totalNonCurrentLiab, { total: true });
   spacer();
   subheader(bs, 'III.  CURRENT LIABILITIES');
-  line('  a)  Short-Term Borrowings', (b) => shortTermBorrowings(b) + bankOdInBankAccounts(b), { note: 4 });
-  line('  b)  Trade Payables', tradePayables, { note: 5 });
-  line('  c)  Duties & Taxes (Net)', dutiesAndTaxesNet);
-  line('  d)  Other Current Liabilities', otherCurrentLiabilities, { note: 6 });
-  line('  e)  Short-Term Provisions', shortTermProvisions, { note: 7 });
+  line('@ Short-Term Borrowings', shortTermBorrowings, { lineId: 'st_borrowings' });
+  line('@ Trade Payables — Micro & Small Enterprises', tradePayablesMsme, { lineId: 'trade_payables_msme' });
+  line('@ Trade Payables — Others', tradePayablesOther, { lineId: 'trade_payables_other' });
+  line('@ Statutory Dues Payable', dutiesTaxesPayable, { lineId: 'duties_taxes_payable' });
+  line('@ Employee Benefits Payable', employeeDues, { lineId: 'employee_dues' });
+  line('@ Advances from Customers', advancesFromCustomers, { lineId: 'advances_from_customers' });
+  line('@ Other Current Liabilities', otherCurrentLiabilities, { lineId: 'other_current_liab' });
+  line('@ Short-Term Provisions', shortTermProvisions, { lineId: 'st_provisions' });
+  line('@ Unclassified — credit balances (REVIEW)', unclassifiedCr, { lineId: 'unclassified_cr' });
   line('Total Current Liabilities', totalCurrentLiab, { total: true });
   spacer();
-  line('  f)  Opening Balance Difference  (pre-existing / auto-balance)', bsReconciliation, { muted: true, italic: true });
-  spacer();
-  line('TOTAL EQUITY & LIABILITIES', (b) => totalEquityLiabilities(b) + bsReconciliation(b), { grand: true });
+  line('TOTAL EQUITY & LIABILITIES', totalEquityLiabilities, { grand: true });
   spacer();
   spacer();
   subheader(bs, 'I.  NON-CURRENT ASSETS');
-  line('  a)  Fixed Assets (Net Block)', netFixedAssets, { note: 8 });
-  line('  b)  Non-Current Investments', nonCurrentInvestments, { note: 9 });
-  line('  c)  Long-Term Loans & Advances', longTermLoansAdvances, { note: 10 });
-  line('  d)  Deferred Tax Asset', deferredTaxAsset);
-  line('  e)  Other Non-Current Assets', otherNonCurrentAssets);
+  line('@ Property, Plant and Equipment', netFixedAssets, { lineId: 'ppe' });
+  line('@ Intangible Assets', intangibleAssets, { lineId: 'intangibles' });
+  line('@ Capital Work-in-Progress', cwipTotal, { lineId: 'cwip' });
+  line('@ Intangible Assets under Development', intangiblesUnderDevelopment, { lineId: 'intangibles_dev' });
+  line('@ Non-Current Investments', nonCurrentInvestments, { lineId: 'nc_investments' });
+  line('@ Deferred Tax Asset', deferredTaxAsset, { lineId: 'dta' });
+  line('@ Long-Term Loans & Advances', longTermLoansAdvances, { lineId: 'lt_loans_advances' });
+  line('@ Other Non-Current Assets', otherNonCurrentAssets, { lineId: 'other_nc_assets' });
   line('Total Non-Current Assets', totalNonCurrentAssets, { total: true });
   spacer();
   subheader(bs, 'II.  CURRENT ASSETS');
-  line('  a)  Inventories (Closing Stock)', closingStock, { note: 11 });
-  line('  b)  Trade Receivables', tradeReceivables, { note: 12 });
-  line('  c)  Cash & Cash Equivalents', cashAndBank, { note: 13 });
-  line('  d)  Other Current Assets', otherCurrentAssets, { note: 14 });
+  line('@ Current Investments', currentInvestments, { lineId: 'c_investments' });
+  line('@ Inventories (Closing Stock)', closingStock, { lineId: 'inventories' });
+  line('@ Trade Receivables', tradeReceivables, { lineId: 'trade_receivables' });
+  line('@ Cash & Cash Equivalents', cashAndBank, { lineId: 'cash_bank' });
+  line('@ Short-Term Loans & Advances', shortTermLoansAdvances, { lineId: 'st_loans_advances' });
+  line('@ Other Current Assets', otherCurrentAssets, { lineId: 'other_current_assets' });
+  line('@ Unclassified — debit balances (REVIEW)', unclassifiedDr, { lineId: 'unclassified_dr' });
   line('Total Current Assets', totalCurrentAssets, { total: true });
   spacer();
   line('TOTAL ASSETS', totalAssets, { grand: true });
-  spacer();
-  line('Balance Sheet Difference  (Assets − Equity & Liabilities)', (b) => totalAssets(b) - totalEquityLiabilities(b) - bsReconciliation(b), { muted: true, italic: true });
 
   bs.freeze = { r: headerRow + 1, c: firstValCol };
   XLSX.utils.book_append_sheet(wb, bs.toWS(), BS_SHEET);
@@ -343,7 +424,7 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   const plHeaderRow = r;
   r++;
 
-  const plLine = (label: string, fn: Fn | null, opts: { bold?: boolean; total?: boolean; grand?: boolean; italic?: boolean; note?: number } = {}) => {
+  const plLine = (label: string, fn: Fn | null, opts: { bold?: boolean; total?: boolean; grand?: boolean; italic?: boolean; lineId?: string } = {}) => {
     // Hide nil P&L line items (every column zero) — keep subtotals/totals/headers.
     if (fn && !opts.total && !opts.grand && columns.every((c) => Math.round(fn(c.data)) === 0)) return;
     const lblStyle = opts.grand
@@ -351,11 +432,14 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
       : opts.total
       ? subtotalLabelStyle()
       : labelStyle({ bold: opts.bold, italic: opts.italic });
-    pl.set(r, 0, label, { s: lblStyle, num: false });
-    if (opts.note) {
-      pl.set(r, 1, opts.note, {
+    const text = label.startsWith('@ ') ? `     ${letter()})  ${label.slice(2)}` : label;
+    pl.set(r, 0, text, { s: lblStyle, num: false });
+    const noteNo = opts.lineId ? noteNoByLineId.get(opts.lineId) : undefined;
+    if (noteNo) {
+      const spec = faceNotes.find((n) => n.lineId === opts.lineId)!;
+      pl.set(r, 1, noteNo, {
         s: linkStyle(ALIGN.center),
-        link: internalLink(noteSheetName(opts.note), 'A1', `Note ${opts.note}`),
+        link: internalLink(sheetNameFor(spec), 'A1', `Note ${noteNo}`),
         num: true,
       });
     }
@@ -371,21 +455,23 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
     }
     r++;
   };
-  plLine('I.   Revenue from Operations', revenueFromOps, { bold: true, note: 15 });
-  plLine('II.  Other Income', otherIncome, { bold: true, note: 16 });
+  plLine('I.   Revenue from Operations', revenueFromOps, { bold: true, lineId: 'revenue_ops' });
+  plLine('II.  Other Income', otherIncome, { bold: true, lineId: 'other_income' });
   plLine('III. Total Revenue (I + II)', totalRevenue, { total: true });
   spacer();
   plLine('IV.  Expenses', null, { bold: true });
-  plLine('     a)  Cost of Materials / Purchases', purchases, { note: 17 });
-  plLine('     b)  Changes in Inventories', changesInInventories, { italic: true, note: 18 });
-  plLine('     c)  Employee Benefits Expense', employeeCosts, { note: 19 });
-  plLine('     d)  Finance Costs', financeCosts, { note: 20 });
-  plLine('     e)  Depreciation & Amortisation', depreciationFromFA, { note: 21 });
-  plLine('     f)  Other Expenses', (b) => otherIndirectExpenses(b) + directExpenses(b), { note: 22 });
+  subItem = 0;
+  plLine('@ Cost of Materials / Purchases', purchases, { lineId: 'purchases' });
+  plLine('@ Changes in Inventories', changesInInventories, { italic: true });
+  plLine('@ Employee Benefits Expense', employeeCosts, { lineId: 'employee_benefits' });
+  plLine('@ Finance Costs', financeCosts, { lineId: 'finance_costs' });
+  plLine('@ Depreciation & Amortisation', depreciation, { lineId: 'depreciation' });
+  plLine('@ Other Expenses', otherIndirectExpenses, { lineId: 'other_expenses' });
+  plLine('@ Direct Expenses', directExpenses, { lineId: 'direct_expenses' });
   plLine('     Total Expenses', totalExpenses, { total: true });
   spacer();
   plLine('V.   Profit Before Tax', profitBeforeTax, { total: true });
-  plLine('VI.  Tax Expense (balancing to Tally P&L A/c)', taxExpense);
+  plLine('VI.  Tax Expense (not derivable from a Tally export — see note)', taxExpense);
   plLine('VII. Profit After Tax', profitAfterTax, { grand: true });
   spacer();
 
@@ -412,207 +498,116 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   XLSX.utils.book_append_sheet(wb, pl.toWS(), PL_SHEET);
 
   // ───────────────────────── Note sheets ─────────────────────────
-  const noteIndex: Array<[number, string, number]> = [];
-
-  // A note sheet: title band, nav links, builder body, then a Total row.
-  // `dense` flags schedules that get zebra striping on the data body.
-  const noteSheet = (
-    num: number,
-    title: string,
-    build: (s: Sheet, startRow: number) => number,
-    total: number,
-    opts: { dense?: boolean; cols?: number; backTo?: 'bs' | 'pl'; skipIfNil?: boolean } = {},
-  ) => {
-    // Skip emitting an empty schedule (and its orphan tab) when the line is nil.
-    if (opts.skipIfNil && Math.round(total) === 0) return;
-    const s = new Sheet();
-    const dataCols = opts.cols ?? 2; // label + 1 value column by default
-    s.cols = [{ wch: 48 }, ...Array.from({ length: dataCols - 1 }, () => ({ wch: 20 }))];
-    const wide = dataCols - 1;
-    s.merge(0, 0, wide);
-    s.set(0, 0, `Note ${num}:  ${title}`, { s: titleBandStyle(12), num: false });
-    // Nav links row — point back to whichever statement carries this note.
-    const backSheet = opts.backTo === 'pl' ? PL_SHEET : BS_SHEET;
-    const backLabel = opts.backTo === 'pl' ? '← Back to Statement of P&L' : '← Back to Balance Sheet';
-    s.set(1, 0, backLabel, { s: linkStyle(ALIGN.left), link: internalLink(backSheet, 'A1', backSheet), num: false });
-    s.set(1, 1, 'Index', { s: linkStyle(ALIGN.left), link: internalLink(INDEX_SHEET, 'A1', 'Notes Index'), num: false });
-    const bodyStart = 2;
-    let rr = build(s, bodyStart);
-    const bodyEnd = rr - 1;
-    rr = noteRow(s, rr, `Total ${title}`, total, { total: true });
-    if (opts.dense && bodyEnd >= bodyStart) s.applyZebra(bodyStart, bodyEnd, 0, dataCols - 1);
-    // Freeze below the nav row so the body scrolls under it.
-    s.freeze = { r: bodyStart, c: 1 };
-    XLSX.utils.book_append_sheet(wb, s.toWS(), noteSheetName(num));
-    noteIndex.push([num, title, total]);
-  };
-
-  const listLedgers = (s: Sheet, startRow: number, primaries: string[], sign: number, opts: { groupByPrimary?: boolean } = {}): number => {
-    let rr = startRow;
-    for (const pg of primaries) {
-      const ls = ledgersFor(totalCol, pg);
-      if (!ls.length) continue;
-      if (opts.groupByPrimary && primaries.length > 1) rr = noteRow(s, rr, pg, null, { bold: true });
-      for (const l of ls) rr = noteRow(s, rr, labelFor(l, multi), Math.round(sign * l.closing), { indent: opts.groupByPrimary && primaries.length > 1 ? 1 : 0 });
+  // Fixed-asset movement schedule (gross block, depreciation, net block).
+  function renderFaSchedule(s: Sheet, startRow: number): number {
+    const rows = fixedAssetsSchedule(totalCol);
+    if (!rows.length) return startRow;
+    let rr = startRow + 1;
+    s.merge(rr, 0, 9);
+    s.set(rr, 0, 'Movement in Gross Block, Depreciation and Net Block', { s: sectionHeaderStyle(), num: false });
+    rr++;
+    const heads = ['Asset Block', 'Gross — Opening', 'Additions', 'Disposals', 'Gross — Closing',
+      'Depr — Opening', 'Charge for the year', 'Depr — Closing', 'Net — Opening', 'Net — Closing'];
+    heads.forEach((h, c) => s.set(rr, c, h, { s: columnHeaderStyle(c === 0 ? ALIGN.left : ALIGN.center), num: false }));
+    rr++;
+    const first = rr;
+    for (const row of rows) {
+      s.set(rr, 0, row.name, { s: labelStyle(), num: false });
+      [row.grossOpen, row.additions, row.disposals, row.grossClose, row.deprOpen, row.deprCharge,
+        row.deprClose, row.netOpen, row.netClose].forEach((v, i) =>
+          s.set(rr, 1 + i, Math.round(v), { s: numberStyle(Z), num: true }));
+      rr++;
     }
-    return rr;
-  };
+    s.set(rr, 0, 'Total', { s: subtotalLabelStyle(), num: false });
+    for (let c = 1; c <= 9; c++) {
+      const col = XLSX.utils.encode_col(c);
+      const cached = rows.reduce((a, r) => a + [r.grossOpen, r.additions, r.disposals, r.grossClose,
+        r.deprOpen, r.deprCharge, r.deprClose, r.netOpen, r.netClose][c - 1], 0);
+      s.setFormula(rr, c, `SUM(${col}${first + 1}:${col}${rr})`, Math.round(cached), subtotalNumberStyle(Z));
+    }
+    return rr + 1;
+  }
 
-  // FIFO ageing sub-schedule (used inside N5 Trade Payables & N12 Trade Receivables).
-  // Columns: Party | <buckets> | Outstanding | Advance.  Returns next row.
-  const renderAgeing = (s: Sheet, startRow: number, ageing: AgeingResult, heading: string): number => {
+  // FIFO ageing sub-schedule. Columns: Party | <buckets> | Outstanding | Advance.
+  function renderAgeing(s: Sheet, startRow: number, ageing: AgeingResult, heading: string): number {
     let rr = startRow + 1; // blank spacer
-    const lastC = 1 + BUCKET_LABELS.length + 1; // party(0) + buckets + outstanding(+1) [advance separate]
+    const lastC = 1 + BUCKET_LABELS.length;
     const advCol = lastC + 1;
     s.merge(rr, 0, advCol);
     s.set(rr, 0, `${heading} — FIFO Ageing (as at ${ageing.asOfIso})  ·  ageing buckets in days`, { s: sectionHeaderStyle(), num: false });
     rr++;
-    // header
     s.set(rr, 0, 'Party', { s: columnHeaderStyle(ALIGN.left), num: false });
     BUCKET_LABELS.forEach((b, i) => s.set(rr, 1 + i, b, { s: columnHeaderStyle(ALIGN.center), num: false }));
     s.set(rr, lastC, 'Outstanding', { s: columnHeaderStyle(ALIGN.center), num: false });
     s.set(rr, advCol, 'Advance', { s: columnHeaderStyle(ALIGN.center), num: false });
     rr++;
-    const z = NUMFMT.accounting;
-    for (const p of ageing.parties) {
-      s.set(rr, 0, multi && p.branch ? `[${p.branch}] ${p.party}` : p.party, { s: labelStyle(), num: false });
-      BUCKET_LABELS.forEach((b, i) => s.set(rr, 1 + i, Math.round(p.buckets[b] || 0), { s: numberStyle(z), num: true }));
-      s.set(rr, lastC, Math.round(p.outstanding), { s: numberStyle(z), num: true });
-      s.set(rr, advCol, Math.round(p.advance), { s: numberStyle(z), num: true });
+    for (const pty of ageing.parties) {
+      s.set(rr, 0, multi && pty.branch ? `[${pty.branch}] ${pty.party}` : pty.party, { s: labelStyle(), num: false });
+      BUCKET_LABELS.forEach((b, i) => s.set(rr, 1 + i, Math.round(pty.buckets[b] || 0), { s: numberStyle(Z), num: true }));
+      s.set(rr, lastC, Math.round(pty.outstanding), { s: numberStyle(Z), num: true });
+      s.set(rr, advCol, Math.round(pty.advance), { s: numberStyle(Z), num: true });
       rr++;
     }
-    // totals
     s.set(rr, 0, 'Total', { s: subtotalLabelStyle(), num: false });
-    BUCKET_LABELS.forEach((b, i) => s.set(rr, 1 + i, Math.round(ageing.totals[b] || 0), { s: subtotalNumberStyle(z), num: true }));
-    s.set(rr, lastC, Math.round(ageing.grandOutstanding), { s: subtotalNumberStyle(z), num: true });
-    s.set(rr, advCol, Math.round(ageing.grandAdvance), { s: subtotalNumberStyle(z), num: true });
+    BUCKET_LABELS.forEach((b, i) => s.set(rr, 1 + i, Math.round(ageing.totals[b] || 0), { s: subtotalNumberStyle(Z), num: true }));
+    s.set(rr, lastC, Math.round(ageing.grandOutstanding), { s: subtotalNumberStyle(Z), num: true });
+    s.set(rr, advCol, Math.round(ageing.grandAdvance), { s: subtotalNumberStyle(Z), num: true });
+    return rr + 1;
+  }
+
+  for (const spec of faceNotes) {
+    const num = noteNoByLineId.get(spec.lineId)!;
+    const sheetName = sheetNameFor(spec);
+    const ls = ledgersForLine(totalCol, spec.lineId);
+    const sign = LINE_BY_ID[spec.lineId]?.displaySign ?? 1;
+    const s = new Sheet();
+    const branchCol = multi ? 1 : 0;
+    const amtCol = 2 + branchCol;
+    s.cols = multi
+      ? [{ wch: 44 }, { wch: 28 }, { wch: 16 }, { wch: 20 }]
+      : [{ wch: 44 }, { wch: 28 }, { wch: 20 }];
+
+    s.merge(0, 0, amtCol);
+    s.set(0, 0, `Note ${num}:  ${spec.title}`, { s: titleBandStyle(12), num: false });
+    const backSheet = spec.backTo === 'pl' ? PL_SHEET : BS_SHEET;
+    s.set(1, 0, spec.backTo === 'pl' ? '← Back to Statement of P&L' : '← Back to Balance Sheet',
+      { s: linkStyle(ALIGN.left), link: internalLink(backSheet, 'A1', backSheet), num: false });
+    s.set(1, 1, 'Notes Index', { s: linkStyle(ALIGN.left), link: internalLink(INDEX_SHEET, 'A1', 'Notes Index'), num: false });
+
+    // Column headers make the ledger→line linkage explicit.
+    let rr = 3;
+    s.set(rr, 0, 'Ledger', { s: columnHeaderStyle(ALIGN.left), num: false });
+    s.set(rr, 1, 'Tally Group', { s: columnHeaderStyle(ALIGN.left), num: false });
+    if (multi) s.set(rr, 2, 'Branch', { s: columnHeaderStyle(ALIGN.left), num: false });
+    s.set(rr, amtCol, `Amount ${unit}`, { s: columnHeaderStyle(ALIGN.right), num: false });
     rr++;
-    return rr;
-  };
+    const first = rr;
 
-  noteSheet(1, 'Share Capital', (s, rr) => {
-    for (const l of ledgersFor(totalCol, 'Capital Account')) {
-      const lc = l.name.toLowerCase();
-      if (!lc.includes('reserve') && !lc.includes('profit')) rr = noteRow(s, rr, labelFor(l, multi), Math.round(l.closing));
-    }
-    return rr;
-  }, shareCapital(totalCol));
-
-  noteSheet(2, 'Reserves & Surplus', (s, rr) => {
-    for (const l of ledgersFor(totalCol, 'Capital Account')) if (l.name.toLowerCase().includes('reserve')) rr = noteRow(s, rr, labelFor(l, multi), Math.round(l.closing));
-    for (const l of ledgersFor(totalCol, 'Reserves & Surplus')) rr = noteRow(s, rr, labelFor(l, multi), Math.round(l.closing));
-    rr = noteRow(s, rr, 'Retained earnings — opening (prior years)', Math.round(totalCol.pnlOpening));
-    rr = noteRow(s, rr, 'Profit for the year (transaction-derived)', Math.round(currentYearProfit(totalCol)));
-    return rr;
-  }, reservesSurplus(totalCol));
-
-  noteSheet(3, 'Long-Term Borrowings', (s, rr) => listLedgers(s, rr, ['Secured Loans', 'Unsecured Loans', 'Loans (Liability)'], 1, { groupByPrimary: true }), longTermBorrowings(totalCol), { dense: true });
-  noteSheet(4, 'Short-Term Borrowings', (s, rr) => {
-    rr = listLedgers(s, rr, ['Bank OD A/c'], 1);
-    for (const l of ledgersFor(totalCol, 'Bank Accounts')) if (l.closing > 0) rr = noteRow(s, rr, labelFor(l, multi) + ' (credit balance / OD)', Math.round(l.closing));
-    return rr;
-  }, shortTermBorrowings(totalCol) + bankOdInBankAccounts(totalCol));
-  noteSheet(5, 'Trade Payables', (s, rr) => {
-    rr = listLedgers(s, rr, ['Sundry Creditors'], 1);
-    if (input.payablesAgeing && input.payablesAgeing.parties.length) rr = renderAgeing(s, rr, input.payablesAgeing, 'Trade Payables');
-    return rr;
-  }, tradePayables(totalCol), { dense: true, cols: input.payablesAgeing ? 10 : 2 });
-  noteSheet(6, 'Other Current Liabilities', (s, rr) => listLedgers(s, rr, ['Current Liabilities', 'Branch / Divisions', 'Suspense A/c'], 1, { groupByPrimary: true }), otherCurrentLiabilities(totalCol), { dense: true });
-  noteSheet(7, 'Short-Term Provisions', (s, rr) => listLedgers(s, rr, ['Provisions'], 1), shortTermProvisions(totalCol), { dense: true });
-
-  noteSheet(8, 'Fixed Assets', (s, rr) => {
-    const heads = ['Asset Block', 'Gross Block', 'Accum. Depr.', 'Net Block'];
-    heads.forEach((h, c) => s.set(rr, c, h, { s: columnHeaderStyle(c === 0 ? ALIGN.left : ALIGN.right), num: false }));
-    rr++;
-    for (const row of fixedAssetsSchedule(totalCol)) {
-      s.set(rr, 0, row.name, { s: labelStyle(), num: false });
-      s.set(rr, 1, Math.round(row.grossClose), { s: numberStyle(Z), num: true });
-      s.set(rr, 2, Math.round(row.deprClose), { s: numberStyle(Z), num: true });
-      s.set(rr, 3, Math.round(row.netClose), { s: numberStyle(Z), num: true });
+    const shown = ls.filter((l) => Math.round(l.closing) !== 0);
+    const listed = shown.length ? shown : ls;
+    for (const l of listed) {
+      s.set(rr, 0, l.name, { s: labelStyle(), num: false });
+      s.set(rr, 1, l.parent, { s: labelStyle({ muted: true }), num: false });
+      if (multi) s.set(rr, 2, l.branch, { s: labelStyle({ muted: true }), num: false });
+      s.set(rr, amtCol, Math.round(sign * l.closing), { s: numberStyle(Z), num: true });
       rr++;
     }
-    return rr;
-  }, netFixedAssets(totalCol), { dense: true, cols: 4 });
+    const last = rr - 1;
+    if (last >= first) s.applyZebra(first, last, 0, amtCol);
 
-  noteSheet(9, 'Non-Current Investments', (s, rr) => listLedgers(s, rr, ['Investments'], -1), nonCurrentInvestments(totalCol), { dense: true });
-  noteSheet(10, 'Long-Term Loans & Advances', (s, rr) => listLedgers(s, rr, ['Deposits (Asset)', 'Loans & Advances (Asset)'], -1, { groupByPrimary: true }), longTermLoansAdvances(totalCol), { dense: true });
-  noteSheet(11, 'Inventories', (s, rr) => {
-    rr = noteRow(s, rr, 'Closing Stock (Inventories)', Math.round(closingStock(totalCol)));
-    return rr;
-  }, closingStock(totalCol));
-  noteSheet(12, 'Trade Receivables', (s, rr) => {
-    rr = listLedgers(s, rr, ['Sundry Debtors'], -1);
-    if (input.receivablesAgeing && input.receivablesAgeing.parties.length) rr = renderAgeing(s, rr, input.receivablesAgeing, 'Trade Receivables');
-    return rr;
-  }, tradeReceivables(totalCol), { dense: true, cols: input.receivablesAgeing ? 10 : 2 });
-  noteSheet(13, 'Cash & Cash Equivalents', (s, rr) => {
-    rr = listLedgers(s, rr, ['Cash-in-hand'], -1);
-    for (const l of ledgersFor(totalCol, 'Bank Accounts')) if (l.closing < 0) rr = noteRow(s, rr, labelFor(l, multi), Math.round(-l.closing));
-    return rr;
-  }, cashAndBank(totalCol), { dense: true });
-  noteSheet(14, 'Other Current Assets', (s, rr) => listLedgers(s, rr, ['Current Assets'], -1), otherCurrentAssets(totalCol), { dense: true });
+    // The note casts itself: a real SUM over its own detail rows.
+    s.set(rr, 0, `Total — ${spec.title}`, { s: subtotalLabelStyle(), num: false });
+    const ac = XLSX.utils.encode_col(amtCol);
+    const listedTotal = listed.reduce((a, l) => a + Math.round(sign * l.closing), 0);
+    if (last >= first) s.setFormula(rr, amtCol, `SUM(${ac}${first + 1}:${ac}${last + 1})`, listedTotal, subtotalNumberStyle(Z));
+    else s.set(rr, amtCol, Math.round(spec.total), { s: subtotalNumberStyle(Z), num: true });
+    rr++;
 
-  // ───────────────────── P&L note schedules (N15..N22) ─────────────────────
-  // Expense ledgers carry a debit (negative) closing; income carries a credit
-  // (positive) closing. We negate expenses (sign -1) so each note shows the
-  // positive expense figure that appears on the face of the P&L.
-  const listIndirectByParent = (s: Sheet, startRow: number, pred: (parent: string) => boolean): number => {
-    let rr = startRow;
-    for (const l of ledgersFor(totalCol, 'Indirect Expenses')) {
-      if (pred(l.parent)) rr = noteRow(s, rr, labelFor(l, multi), Math.round(-l.closing));
-    }
-    return rr;
-  };
+    if (spec.enrich) rr = spec.enrich(s, rr);
 
-  noteSheet(15, 'Revenue from Operations',
-    (s, rr) => listLedgers(s, rr, ['Sales Accounts', 'Direct Incomes'], 1, { groupByPrimary: true }),
-    revenueFromOps(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
-
-  noteSheet(16, 'Other Income',
-    (s, rr) => listLedgers(s, rr, ['Indirect Incomes'], 1),
-    otherIncome(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
-
-  noteSheet(17, 'Cost of Materials / Purchases',
-    (s, rr) => listLedgers(s, rr, ['Purchase Accounts'], -1, { groupByPrimary: true }),
-    purchases(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
-
-  noteSheet(18, 'Changes in Inventories',
-    (s, rr) => {
-      rr = noteRow(s, rr, 'Opening Inventory', Math.round(openingStockSafe(totalCol)));
-      rr = noteRow(s, rr, 'Less: Closing Inventory', Math.round(-closingStock(totalCol)));
-      return rr;
-    },
-    changesInInventories(totalCol), { backTo: 'pl', skipIfNil: true });
-
-  noteSheet(19, 'Employee Benefits Expense',
-    (s, rr) => listIndirectByParent(s, rr, (p) => EMPLOYEE_COST_PARENTS.has(p)),
-    employeeCosts(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
-
-  noteSheet(20, 'Finance Costs',
-    (s, rr) => listIndirectByParent(s, rr, (p) => FINANCE_COST_PARENTS.has(p)),
-    financeCosts(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
-
-  noteSheet(21, 'Depreciation & Amortisation',
-    (s, rr) => {
-      for (const row of fixedAssetsSchedule(totalCol)) rr = noteRow(s, rr, row.name, Math.round(row.deprCharge));
-      return rr;
-    },
-    depreciationFromFA(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
-
-  noteSheet(22, 'Other Expenses',
-    (s, rr) => {
-      const hasIndirect = ledgersFor(totalCol, 'Indirect Expenses').some(
-        (l) => !FINANCE_COST_PARENTS.has(l.parent) && !EMPLOYEE_COST_PARENTS.has(l.parent) && Math.round(l.closing) !== 0,
-      );
-      const hasDirect = ledgersFor(totalCol, 'Direct Expenses').some((l) => Math.round(l.closing) !== 0);
-      const split = hasIndirect && hasDirect;
-      if (split) rr = noteRow(s, rr, 'Other Indirect Expenses', null, { bold: true });
-      rr = listIndirectByParent(s, rr, (p) => !FINANCE_COST_PARENTS.has(p) && !EMPLOYEE_COST_PARENTS.has(p));
-      if (split) rr = noteRow(s, rr, 'Direct Expenses', null, { bold: true });
-      rr = listLedgers(s, rr, ['Direct Expenses'], -1);
-      return rr;
-    },
-    otherIndirectExpenses(totalCol) + directExpenses(totalCol), { dense: true, backTo: 'pl', skipIfNil: true });
+    s.freeze = { r: first, c: 1 };
+    XLSX.utils.book_append_sheet(wb, s.toWS(), sheetName);
+  }
 
   // ───────────────────────── Notes Index ─────────────────────────
   const idx = new Sheet();
@@ -630,21 +625,77 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
     idx.set(ir, 0, text, { s: sectionHeaderStyle(), num: false });
     ir++;
   };
-  let lastWasBs = false;
-  for (const [num, title, amt] of noteIndex) {
-    if (num <= 14 && !lastWasBs) {
-      idxSection('Balance Sheet Notes');
-      lastWasBs = true;
-    }
-    if (num === 15) idxSection('Profit & Loss Notes');
-    idx.set(ir, 0, num, { s: linkStyle(ALIGN.center), link: internalLink(noteSheetName(num), 'A1', `Note ${num}`), num: true });
-    idx.set(ir, 1, title, { s: labelStyle(), num: false });
-    idx.set(ir, 2, Math.round(amt), { s: numberStyle(Z), num: true });
+  let section: string | null = null;
+  for (const spec of faceNotes) {
+    const num = noteNoByLineId.get(spec.lineId)!;
+    const want = spec.backTo === 'pl' ? 'Profit & Loss Notes' : 'Balance Sheet Notes';
+    if (section !== want) { idxSection(want); section = want; }
+    idx.set(ir, 0, num, {
+      s: linkStyle(ALIGN.center),
+      link: internalLink(sheetNameFor(spec), 'A1', `Note ${num}`),
+      num: true,
+    });
+    idx.set(ir, 1, spec.title, { s: labelStyle(), num: false });
+    idx.set(ir, 2, Math.round(spec.total), { s: numberStyle(Z), num: true });
     ir++;
   }
+  idx.set(ir + 1, 1, 'Ledger Index (every ledger → its statement line)', {
+    s: linkStyle(ALIGN.left), link: internalLink(LEDGER_INDEX_SHEET, 'A1'), num: false,
+  });
+  idx.set(ir + 2, 1,
+    'Statutory narrative disclosures (promoter shareholding, title deeds, struck-off companies, '
+    + 'CSR, ratios with variance explanations) require management input and are not generated.',
+    { s: labelStyle({ italic: true, muted: true }), num: false });
   // Group Mapping link footer.
-  idx.set(ir + 1, 1, 'Group Mapping (working schedule)', { s: linkStyle(ALIGN.left), link: internalLink(MAP_SHEET, 'A1'), num: false });
+  idx.set(ir + 3, 1, 'Group Mapping (working schedule)', { s: linkStyle(ALIGN.left), link: internalLink(MAP_SHEET, 'A1'), num: false });
   XLSX.utils.book_append_sheet(wb, idx.toWS(), INDEX_SHEET);
+
+  // ───────────────────── Ledger Index ─────────────────────
+  // Every ledger in the books, and exactly where it landed. This is the audit
+  // trail for the classification: any figure on the face can be traced down to
+  // the ledgers behind it, and any ledger can be traced up to its line.
+  {
+    const li = new Sheet();
+    const heads = ['Ledger', 'Tally Group', 'Tally Primary Group', ...(multi ? ['Branch'] : []),
+      'Statement', 'Schedule III Line', 'Note', `Amount ${unit}`, 'Classified By'];
+    li.cols = [{ wch: 42 }, { wch: 26 }, { wch: 24 }, ...(multi ? [{ wch: 14 }] : []),
+      { wch: 15 }, { wch: 40 }, { wch: 7 }, { wch: 18 }, { wch: 24 }];
+    li.merge(0, 0, heads.length - 1);
+    li.set(0, 0, `${input.companyTitle} — Ledger Index (classification audit trail)`, { s: titleBandStyle(12), num: false });
+    li.set(1, 0, '← Back to Notes Index', { s: linkStyle(ALIGN.left), link: internalLink(INDEX_SHEET, 'A1'), num: false });
+    heads.forEach((h, c) => li.set(2, c, h, { s: columnHeaderStyle(c >= heads.length - 2 ? ALIGN.right : ALIGN.left), num: false }));
+
+    const provenance = (l: BsLedger): string =>
+      l.how === 'rule' || l.how === 'sign-rule' ? `${l.how} · ${l.ruleId ?? ''}` : l.how;
+
+    let lr = 3;
+    const sorted = [...totalCol.ledgers].sort((a, b2) =>
+      (a.lineId || '').localeCompare(b2.lineId || '') || a.name.localeCompare(b2.name));
+    for (const l of sorted) {
+      const spec = faceNotes.find((n) => n.lineId === l.lineId);
+      const num = noteNoByLineId.get(l.lineId);
+      const sign = LINE_BY_ID[l.lineId]?.displaySign ?? 1;
+      let c = 0;
+      li.set(lr, c++, l.name, { s: labelStyle(), num: false });
+      li.set(lr, c++, l.parent, { s: labelStyle({ muted: true }), num: false });
+      li.set(lr, c++, l.rawPrimary, { s: labelStyle({ muted: true }), num: false });
+      if (multi) li.set(lr, c++, l.branch, { s: labelStyle({ muted: true }), num: false });
+      li.set(lr, c++, isPnlLine(l.lineId) ? 'P&L' : 'Balance Sheet', { s: labelStyle(), num: false });
+      li.set(lr, c++, LINE_BY_ID[l.lineId]?.label ?? l.lineId, { s: labelStyle(), num: false });
+      if (num && spec) {
+        li.set(lr, c++, num, { s: linkStyle(ALIGN.center), link: internalLink(sheetNameFor(spec), 'A1', `Note ${num}`), num: true });
+      } else {
+        li.set(lr, c++, '', { s: labelStyle(), num: false });
+      }
+      li.set(lr, c++, Math.round(sign * l.closing), { s: numberStyle(Z), num: true });
+      li.set(lr, c++, provenance(l), { s: labelStyle({ muted: true }), num: false });
+      lr++;
+    }
+    if (lr > 3) li.applyZebra(3, lr - 1, 0, heads.length - 1);
+    li.autofilter = `A3:${XLSX.utils.encode_col(heads.length - 1)}${lr}`;
+    li.freeze = { r: 3, c: 1 };
+    XLSX.utils.book_append_sheet(wb, li.toWS(), LEDGER_INDEX_SHEET);
+  }
 
   // ───────────────────── Group Mapping (working tab) ─────────────────────
   // Analysis-layer schedule: autofilter + zebra + source-colour coding.
