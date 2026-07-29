@@ -85,6 +85,23 @@ export interface Gstr1SectionTotal {
   docCount: number;
 }
 
+/** One invoice / note / rate-row, kept so the workbook can list bills. */
+export interface Gstr1Document {
+  section: string;
+  ctin?: string;
+  docNo: string;
+  docDate: string;
+  docType: string;        // R / SEWP / DE, or note type C / D
+  pos?: string;
+  reverseCharge?: string;
+  invoiceValue: number;
+  rate?: number;
+  taxable: number;
+  igst: number; cgst: number; sgst: number; cess: number;
+  /** −1 for credit notes and advances adjusted, which reduce the liability. */
+  sign: 1 | -1;
+}
+
 export interface Gstr1Period {
   form: 'GSTR1';
   gstin: string;
@@ -105,6 +122,7 @@ export interface Gstr1Period {
   hsnTaxable?: number;
   b2bInvCount: number;
   cdnrNoteCount: number;
+  documents: Gstr1Document[];
   qrmpDedupedDocs: number;
   warnings: string[];
   sourceFiles: string[];
@@ -221,7 +239,21 @@ const itemDetInto = (acc: ValueWithTax, itms: any): void => {
   }
 };
 
-const extractSection = (key: string, raw: any, warn: (m: string) => void): Gstr1SectionTotal | null => {
+/** Roll a document's rate-wise items into one line, keeping the rate when unambiguous. */
+const docTotals = (itms: any): ValueWithTax & { rate?: number } => {
+  const v = zeroValue();
+  const rates = new Set<number>();
+  for (const it of Array.isArray(itms) ? itms : []) {
+    const det = it?.itm_det ?? it;
+    addValue(v, num(det?.txval), heads(det));
+    if (det?.rt !== undefined) rates.add(num(det.rt));
+  }
+  return { ...v, rate: rates.size === 1 ? [...rates][0] : undefined };
+};
+
+const extractSection = (
+  key: string, raw: any, warn: (m: string) => void, docs: Gstr1Document[],
+): Gstr1SectionTotal | null => {
   const spec = R1_SECTIONS.find((s) => s.key === key)!;
   const total = zeroValue();
   let docCount = 0;
@@ -238,13 +270,31 @@ const extractSection = (key: string, raw: any, warn: (m: string) => void): Gstr1
   switch (key) {
     case 'b2b': case 'b2ba': case 'b2cl': case 'b2cla': {
       for (const grp of Array.isArray(raw) ? raw : []) {
-        for (const inv of grp?.inv ?? []) { docCount++; itemDetInto(total, inv?.itms); }
+        for (const inv of grp?.inv ?? []) {
+          docCount++; itemDetInto(total, inv?.itms);
+          const t = docTotals(inv?.itms);
+          docs.push({
+            section: key, ctin: grp?.ctin, docNo: String(inv?.inum ?? ''), docDate: String(inv?.idt ?? ''),
+            docType: String(inv?.inv_typ ?? 'R'), pos: String(inv?.pos ?? grp?.pos ?? ''),
+            reverseCharge: String(inv?.rchrg ?? ''), invoiceValue: num(inv?.val), rate: t.rate,
+            taxable: t.taxable, igst: t.igst, cgst: t.cgst, sgst: t.sgst, cess: t.cess, sign: 1,
+          });
+        }
       }
       break;
     }
     case 'b2cs': {
       // Flat rate-wise rows — no invoice wrapper, no `val`.
-      for (const row of Array.isArray(raw) ? raw : []) { docCount++; addValue(total, num(row?.txval), heads(row)); }
+      for (const row of Array.isArray(raw) ? raw : []) {
+        docCount++; addValue(total, num(row?.txval), heads(row));
+        const h = heads(row);
+        docs.push({
+          section: key, docNo: '(rate-wise summary)', docDate: '',
+          docType: String(row?.sply_ty ?? ''), pos: String(row?.pos ?? ''),
+          invoiceValue: 0, rate: num(row?.rt), taxable: num(row?.txval),
+          igst: h.igst, cgst: h.cgst, sgst: h.sgst, cess: h.cess, sign: 1,
+        });
+      }
       break;
     }
     case 'b2csa': {
@@ -258,24 +308,64 @@ const extractSection = (key: string, raw: any, warn: (m: string) => void): Gstr1
     }
     case 'exp': case 'expa': {
       for (const grp of Array.isArray(raw) ? raw : []) {
-        for (const inv of grp?.inv ?? []) { docCount++; itemDetInto(total, inv?.itms); }
+        for (const inv of grp?.inv ?? []) {
+          docCount++; itemDetInto(total, inv?.itms);
+          const t = docTotals(inv?.itms);
+          docs.push({
+            section: key, docNo: String(inv?.inum ?? ''), docDate: String(inv?.idt ?? ''),
+            docType: String(grp?.exp_typ ?? ''), invoiceValue: num(inv?.val), rate: t.rate,
+            taxable: t.taxable, igst: t.igst, cgst: t.cgst, sgst: t.sgst, cess: t.cess, sign: 1,
+          });
+        }
       }
       break;
     }
     case 'cdnr': case 'cdnra': {
       for (const grp of Array.isArray(raw) ? raw : []) {
-        for (const nt of grp?.nt ?? []) { docCount++; itemDetInto(total, nt?.itms); noteInto(nt?.ntty, nt?.itms); }
+        for (const nt of grp?.nt ?? []) {
+          docCount++; itemDetInto(total, nt?.itms); noteInto(nt?.ntty, nt?.itms);
+          const t = docTotals(nt?.itms);
+          const isCredit = String(nt?.ntty ?? '').toUpperCase() === 'C';
+          docs.push({
+            section: key, ctin: grp?.ctin, docNo: String(nt?.nt_num ?? ''), docDate: String(nt?.nt_dt ?? ''),
+            docType: isCredit ? 'Credit note' : 'Debit note', pos: String(nt?.pos ?? ''),
+            reverseCharge: String(nt?.rchrg ?? ''), invoiceValue: num(nt?.val), rate: t.rate,
+            taxable: t.taxable, igst: t.igst, cgst: t.cgst, sgst: t.sgst, cess: t.cess,
+            sign: isCredit ? -1 : 1,
+          });
+        }
       }
       break;
     }
     case 'cdnur': case 'cdnura': {
       // Flat — no counterparty wrapper.
-      for (const nt of Array.isArray(raw) ? raw : []) { docCount++; itemDetInto(total, nt?.itms); noteInto(nt?.ntty, nt?.itms); }
+      for (const nt of Array.isArray(raw) ? raw : []) {
+        docCount++; itemDetInto(total, nt?.itms); noteInto(nt?.ntty, nt?.itms);
+        const t = docTotals(nt?.itms);
+        const isCredit = String(nt?.ntty ?? '').toUpperCase() === 'C';
+        docs.push({
+          section: key, docNo: String(nt?.nt_num ?? ''), docDate: String(nt?.nt_dt ?? ''),
+          docType: `${isCredit ? 'Credit note' : 'Debit note'} — ${String(nt?.typ ?? '')}`,
+          pos: String(nt?.pos ?? ''), invoiceValue: num(nt?.val), rate: t.rate,
+          taxable: t.taxable, igst: t.igst, cgst: t.cgst, sgst: t.sgst, cess: t.cess,
+          sign: isCredit ? -1 : 1,
+        });
+      }
       break;
     }
     case 'at': case 'ata': case 'txpd': case 'txpda': {
+      const adjusted = key.startsWith('txpd');
       for (const grp of Array.isArray(raw) ? raw : []) {
-        for (const it of grp?.itms ?? []) { docCount++; addValue(total, num(it?.ad_amt), heads(it)); }
+        for (const it of grp?.itms ?? []) {
+          docCount++; addValue(total, num(it?.ad_amt), heads(it));
+          const h = heads(it);
+          docs.push({
+            section: key, docNo: adjusted ? '(advance adjusted)' : '(advance received)', docDate: '',
+            docType: String(grp?.sply_ty ?? ''), pos: String(grp?.pos ?? ''),
+            invoiceValue: 0, rate: num(it?.rt), taxable: num(it?.ad_amt),
+            igst: h.igst, cgst: h.cgst, sgst: h.sgst, cess: h.cess, sign: adjusted ? -1 : 1,
+          });
+        }
       }
       break;
     }
@@ -333,10 +423,11 @@ const normaliseGstr1 = (j: any, sourceFiles: string[]): Gstr1Period => {
   const fyStart = fyStartOf(p.mm, p.yyyy);
 
   const sections: Gstr1SectionTotal[] = [];
+  const documents: Gstr1Document[] = [];
   for (const key of Object.keys(j)) {
     if (R1_HEADER_KEYS.has(key)) continue;
     if (!R1_SECTION_KEYS.has(key)) { warn(`unrecognised section '${key}' ignored`); continue; }
-    const s = extractSection(key, j[key], warn);
+    const s = extractSection(key, j[key], warn, documents);
     if (s) sections.push(s);
   }
   sections.sort((a, b) => R1_SECTIONS.findIndex((s) => s.key === a.key) - R1_SECTIONS.findIndex((s) => s.key === b.key));
@@ -402,6 +493,7 @@ const normaliseGstr1 = (j: any, sourceFiles: string[]): Gstr1Period => {
     hsnTaxable: by('hsn')?.total.taxable,
     b2bInvCount: (by('b2b')?.docCount ?? 0) + (by('b2ba')?.docCount ?? 0),
     cdnrNoteCount: (by('cdnr')?.docCount ?? 0) + (by('cdnra')?.docCount ?? 0),
+    documents,
     qrmpDedupedDocs: 0,
     warnings,
     sourceFiles,

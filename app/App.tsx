@@ -71,6 +71,17 @@ const BalanceSheetCleanlinessAnalytics = lazy(() => import('./components/modules
 const ITC3BReconciliation = lazy(() => import('./components/modules/ITC3BReconciliation'));
 const OrphanPLVouchers = lazy(() => import('./components/modules/OrphanPLVouchers'));
 
+/** URL slug for a module, e.g. GST_RETURNS_SUMMARY -> 'gst-returns-summary'. */
+export const slugForModule = (m: AnalysisType): string => String(m).toLowerCase().replace(/_/g, '-');
+
+/** Reverse of slugForModule; null when the hash names no known module. */
+export const moduleFromSlug = (slug: string): AnalysisType | null => {
+  if (!slug) return null;
+  const hit = (Object.values(AnalysisType) as AnalysisType[])
+    .find((m) => slugForModule(m) === slug.toLowerCase());
+  return hit ?? null;
+};
+
 const MODULE_LABELS: Record<AnalysisType, string> = {
   [AnalysisType.DASHBOARD]: 'Dashboard Overview',
   [AnalysisType.AUDIT_CONFIG]: 'Audit Configuration Manager',
@@ -208,6 +219,10 @@ const App: React.FC = () => {
   const [data, setData] = useState<LedgerEntry[]>([]);
   const [store, setStore] = useState<TallyStore | null>(null);
   const [activeModule, setActiveModule] = useState<AnalysisType>(AnalysisType.DASHBOARD);
+  // Lets the app be used without importing a Tally dataset first. Several modules
+  // (GST Returns Summary, the reconciliations, Balance Sheet) carry their own
+  // uploads and need nothing from the Tally store.
+  const [skippedImport, setSkippedImport] = useState(false);
   const [hasDataset, setHasDataset] = useState(false);
   const [isSqlMode, setIsSqlMode] = useState(false);
   const [sqlNote, setSqlNote] = useState('');
@@ -598,7 +613,25 @@ const App: React.FC = () => {
     );
   };
 
-  if (!hasDataset) {
+  // Deep-linking: /#gst-returns-summary opens that module directly, skipping the
+  // Tally import screen. One-way by design — reload to get back to the import flow.
+  useEffect(() => {
+    const fromHash = moduleFromSlug(window.location.hash.replace(/^#/, ''));
+    if (fromHash) {
+      setActiveModule(fromHash);
+      setSkippedImport(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!skippedImport) return;
+    const slug = slugForModule(activeModule);
+    if (slug && window.location.hash.replace(/^#/, '') !== slug) {
+      window.history.replaceState(null, '', `#${slug}`);
+    }
+  }, [activeModule, skippedImport]);
+
+  if (!hasDataset && !skippedImport) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col">
         <header className="bg-white border-b border-slate-200 px-4 py-3 sm:px-6">
@@ -609,6 +642,20 @@ const App: React.FC = () => {
         </header>
         <main className="flex-1 p-4 sm:p-6">
           <FileUpload onDataLoaded={handleDataLoaded} />
+          <div className="max-w-3xl mx-auto mt-6 text-center">
+            <button
+              onClick={() => setSkippedImport(true)}
+              className="text-sm font-semibold text-blue-600 hover:text-blue-700 underline underline-offset-4"
+            >
+              Continue without a Tally file →
+            </button>
+            <p className="mt-2 text-xs text-slate-500 max-w-xl mx-auto">
+              Opens every module. The GST Returns Summary, the GSTR-2B and ITC-3B reconciliations and
+              the Balance Sheet take their own uploads and work on their own; modules that read the
+              Tally dataset will have nothing to show until you import one. Reload the page to return
+              to the import screen.
+            </p>
+          </div>
         </main>
       </div>
     );

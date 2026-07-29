@@ -162,6 +162,19 @@ const main = async () => {
   }
   check('09/2025 ITC blocked under reason P', ds.b2.find((x) => x.period === '092025')!.unavailReasons['P'] ?? 0, 8, 0);
 
+  section('Bill-wise detail');
+  const allDocs = ds.r1.flatMap((x) => x.documents);
+  check('documents listed', allDocs.length, 30, 0);
+  const docTaxable = allDocs.reduce((a, d) => a + d.taxable * d.sign, 0);
+  const netTaxable = ds.r1.reduce((a, x) => a + x.netOutward.taxable, 0);
+  checkTrue('bill-wise total ties to net outward', Math.abs(docTaxable - netTaxable) <= 0.01,
+    `documents ${inr(docTaxable)} vs net outward ${inr(netTaxable)}`);
+  check('bill-wise taxable total', docTaxable, 199601396.92);
+  checkTrue('credit notes carry a negative sign',
+    allDocs.some((d) => d.sign === -1 && /Credit note/.test(d.docType)));
+  checkTrue('every document names its counterparty or table',
+    allDocs.every((d) => (d.ctin ?? '').length > 0 || d.docNo.startsWith('(') || d.section.startsWith('exp')));
+
   section('Outward comparison — basis follows the filing frequency');
   const cmp = model.fys[0].outwardCompare;
   const row = (label: string) => cmp.find((r) => r.label.startsWith(label));
