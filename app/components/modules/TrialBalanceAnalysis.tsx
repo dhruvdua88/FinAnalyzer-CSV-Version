@@ -100,6 +100,9 @@ const TrialBalanceAnalysis: React.FC<TrialBalanceAnalysisProps> = () => {
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
   const [reconFailOnly, setReconFailOnly] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  // Most Tally charts of accounts carry a long tail of ledgers that were never
+  // used. Showing them buries the ones that matter, so they are hidden by default.
+  const [hideUnused, setHideUnused] = useState(true);
 
   const tb = useMemo<TrialBalanceResult | null>(() => {
     if (!store) return null;
@@ -116,6 +119,10 @@ const TrialBalanceAnalysis: React.FC<TrialBalanceAnalysisProps> = () => {
     const q = searchTerm.trim().toLowerCase();
     const predicate = (row: TbLedgerRow): boolean => {
       if (activityFilter !== 'all' && row.activity !== activityFilter) return false;
+      if (hideUnused && row.activity === 'never-used'
+        && Math.abs(row.openingDr) < 0.005 && Math.abs(row.openingCr) < 0.005
+        && Math.abs(row.duringDr) < 0.005 && Math.abs(row.duringCr) < 0.005
+        && Math.abs(row.closingDr) < 0.005 && Math.abs(row.closingCr) < 0.005) return false;
       if (reconFailOnly && row.reconPass) return false;
       if (!q) return true;
       return (
@@ -129,7 +136,7 @@ const TrialBalanceAnalysis: React.FC<TrialBalanceAnalysisProps> = () => {
     let tree = filterTree(tb.tree, predicate);
     if (primaryFilter !== 'all') tree = tree.filter((n) => n.name === primaryFilter);
     return tree;
-  }, [tb, searchTerm, primaryFilter, activityFilter, reconFailOnly]);
+  }, [tb, searchTerm, primaryFilter, activityFilter, reconFailOnly, hideUnused]);
 
   const toggleNode = (path: string) =>
     setCollapsed((prev) => ({ ...prev, [path]: !prev[path] }));
@@ -148,79 +155,17 @@ const TrialBalanceAnalysis: React.FC<TrialBalanceAnalysisProps> = () => {
     setCollapsed(next);
   };
   const expandAll = () => setCollapsed({});
+  const unusedCount = tb?.activityCounts['never-used'] ?? 0;
 
   const handleExport = async () => {
     if (!tb) return;
-    const XLSX = await import('xlsx-js-style');
-    const aoa: any[][] = [];
-    const periodLabel = tb.periodFrom && tb.periodTo ? `${formatDDMMYYYY(tb.periodFrom)} to ${formatDDMMYYYY(tb.periodTo)}` : 'All periods';
-
-    aoa.push(['Trial Balance']);
-    aoa.push([`Period: ${periodLabel}`]);
-    aoa.push([`Generated: ${new Date().toLocaleString('en-IN')}`]);
-    aoa.push([]);
-
-    // Balance check
-    aoa.push(['Balance Check', '', 'Dr', 'Cr', 'Delta', 'Status']);
-    for (const [k, v] of [
-      ['Opening', tb.balanceCheck.opening],
-      ['During',  tb.balanceCheck.during],
-      ['Closing', tb.balanceCheck.closing],
-    ] as const) {
-      aoa.push([k, '', v.dr, v.cr, v.delta, v.ok ? 'PASS' : 'REVIEW']);
-    }
-    aoa.push([]);
-
-    // Activity counts
-    aoa.push(['Activity Summary']);
-    for (const [k, v] of Object.entries(tb.activityCounts)) aoa.push([k, '', v]);
-    aoa.push([]);
-
-    // Detail tree
-    aoa.push(['Level', 'Group / Ledger', 'Activity', 'Recon', 'Opening Dr', 'Opening Cr', 'During Dr', 'During Cr', 'Closing Dr', 'Closing Cr']);
-    const walk = (nodes: TbGroupNode[]) => {
-      for (const n of nodes) {
-        aoa.push([
-          n.level === 0 ? 'PRIMARY' : `L${n.level}`,
-          `${'  '.repeat(n.level)}${n.name}  (${n.ledgerCount})`,
-          '', '',
-          n.openingDr, n.openingCr, n.duringDr, n.duringCr, n.closingDr, n.closingCr,
-        ]);
-        walk(n.childGroups);
-        for (const l of n.childLedgers) {
-          aoa.push([
-            `L${n.level + 1}`,
-            `${'  '.repeat(n.level + 1)}${l.ledger}`,
-            l.activity,
-            l.reconPass ? 'PASS' : `FAIL Δ${l.reconDelta.toFixed(2)}`,
-            l.openingDr, l.openingCr, l.duringDr, l.duringCr, l.closingDr, l.closingCr,
-          ]);
-        }
-      }
-    };
-    walk(filteredTree);
-
-    aoa.push([]);
-    aoa.push([
-      'GRAND TOTAL', '', '', '',
-      tb.grandTotals.openingDr, tb.grandTotals.openingCr,
-      tb.grandTotals.duringDr,  tb.grandTotals.duringCr,
-      tb.grandTotals.closingDr, tb.grandTotals.closingCr,
-    ]);
-
-    if (tb.reconciliationFailures.length > 0) {
-      aoa.push([]);
-      aoa.push([`Reconciliation Failures (${tb.reconciliationFailures.length})`]);
-      aoa.push(['Ledger', 'Group', 'Opening', 'During Net', 'Calc Closing', 'Master Closing', 'Delta']);
-      for (const r of tb.reconciliationFailures) {
-        aoa.push([r.ledger, r.group, r.openingSigned, r.duringNet, r.closingCalculated, r.closingSigned, r.reconDelta]);
-      }
-    }
-
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = [{ wch: 10 }, { wch: 40 }, { wch: 12 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Trial Balance');
+    const XLSX = (await import('xlsx-js-style')).default;
+    const { buildTrialBalanceWorkbook } = await import('../../services/trialBalanceExcel');
+    const wb = buildTrialBalanceWorkbook({
+      tb: { ...tb, tree: filteredTree },
+      companyTitle: store?.meta?.companyName || 'Trial Balance',
+      hideUnused,
+    });
     const stamp = new Date().toISOString().slice(0, 10);
     XLSX.writeFile(wb, `Trial_Balance_${stamp}.xlsx`, { compression: true, cellStyles: true });
   };
@@ -282,6 +227,18 @@ const TrialBalanceAnalysis: React.FC<TrialBalanceAnalysisProps> = () => {
         <button onClick={collapseAll} className="px-3 py-2 text-xs font-bold rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50">
           Collapse all
         </button>
+        <label className="flex items-center gap-2 px-3 py-2 text-xs font-bold rounded-lg border border-slate-200 text-slate-700 cursor-pointer hover:bg-slate-50">
+          <input
+            type="checkbox"
+            checked={!hideUnused}
+            onChange={(e) => setHideUnused(!e.target.checked)}
+            className="accent-slate-700"
+          />
+          Show unused ledgers
+          {hideUnused && unusedCount > 0 && (
+            <span className="font-normal text-slate-400">({unusedCount} hidden)</span>
+          )}
+        </label>
         <button onClick={handleExport}
           className="ml-auto px-4 py-2 inline-flex items-center gap-2 text-sm font-bold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm">
           <Download size={15} />

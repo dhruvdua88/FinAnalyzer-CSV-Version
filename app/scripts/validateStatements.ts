@@ -16,6 +16,7 @@ import { TallyStore } from '../services/tally';
 import { getTrialBalance } from '../services/tally/queries';
 import * as BS from '../services/balanceSheet';
 import { buildFinancialStatementsWorkbook } from '../services/financialStatementsExcel';
+import { buildTrialBalanceWorkbook } from '../services/trialBalanceExcel';
 
 // ── assertion plumbing ───────────────────────────────────────────────────────
 let pass = 0;
@@ -184,6 +185,24 @@ const main = async () => {
     .map((n) => Number(/^N(\d+) /.exec(n)![1]))
     .sort((a, b) => a - b)
     .every((v, i) => v === i + 1), noteSheets.join(', '));
+
+  // ── Trial Balance workbook ────────────────────────────────────────────────
+  section('Trial Balance workbook');
+  const tbWb = buildTrialBalanceWorkbook({ tb, companyTitle: store.meta?.companyName ?? '', hideUnused: true });
+  const tws: any = tbWb.Sheets['Trial Balance'];
+  checkTrue('trial balance sheet produced', !!tws);
+  let tbFormulas = 0;
+  let styled = 0;
+  for (const key of Object.keys(tws)) {
+    if (key.startsWith('!')) continue;
+    if (tws[key].f) tbFormulas++;
+    if (tws[key].s) styled++;
+  }
+  checkTrue('grand total is a live SUM over the ledger rows', tbFormulas >= 6, `${tbFormulas} formulas`);
+  checkTrue('every cell carries a style (formatted, not a raw dump)', styled > 100, `${styled} styled cells`);
+  const cells = Object.keys(tws).filter((k) => !k.startsWith('!'));
+  checkTrue('unused ledgers are excluded from the export',
+    !cells.some((k) => typeof tws[k].v === 'string' && /Abhijit Manoj Bhai/.test(tws[k].v)));
 
   // ── verdict ───────────────────────────────────────────────────────────────
   console.log(`\n${fail === 0 ? '\x1b[32m' : '\x1b[31m'}${pass} passed, ${fail} failed\x1b[0m\n`);

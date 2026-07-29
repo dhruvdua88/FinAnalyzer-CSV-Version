@@ -11,6 +11,8 @@
 
 // ── Palette (audit-grade slate/zinc; mirrors ProfitLossAnalysis.tsx) ──
 // Kept intentionally small (~6 fills) so the workbook reads as one document.
+import XLSX from 'xlsx-js-style';
+
 export const PALETTE = {
   // Brand / workbook-title band + statement-title band
   band: '0F2440', // deep slate
@@ -221,3 +223,67 @@ export const zebra = (
     }
   }
 };
+
+// A lightweight cell-addressed sheet that converts to a SheetJS worksheet.
+export interface CellOpt {
+  s?: Style;
+  z?: string;
+  link?: { Target: string; Tooltip?: string };
+  num?: boolean;
+}
+
+export class Sheet {
+  private cells: Record<string, any> = {};
+  private maxR = 0;
+  private maxC = 0;
+  merges: any[] = [];
+  cols: Array<{ wch: number }> = [];
+  freeze?: { r: number; c: number };
+  autofilter?: string;
+
+  set(r: number, c: number, v: any, opt: CellOpt = {}): void {
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const isNum = opt.num ?? typeof v === 'number';
+    const cell: any = { v, t: isNum ? 'n' : 's' };
+    if (opt.s) cell.s = opt.s;
+    // Mirror the style's numFmt onto cell.z so the value renders even in
+    // viewers that read .z rather than .s.numFmt.
+    const z = opt.z ?? (opt.s && opt.s.numFmt);
+    if (z) cell.z = z;
+    if (opt.link) cell.l = opt.link;
+    this.cells[ref] = cell;
+    if (r > this.maxR) this.maxR = r;
+    if (c > this.maxC) this.maxC = c;
+  }
+
+  /** Write a real Excel formula, caching the computed value for non-recalculating viewers. */
+  setFormula(r: number, c: number, formula: string, cached: number, style?: Style, z: string = NUMFMT.accounting): void {
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const cell: any = { t: 'n', f: formula, v: cached, z };
+    if (style) cell.s = style;
+    this.cells[ref] = cell;
+    if (r > this.maxR) this.maxR = r;
+    if (c > this.maxC) this.maxC = c;
+  }
+
+  merge(r: number, c1: number, c2: number): void {
+    this.merges.push({ s: { r, c: c1 }, e: { r, c: c2 } });
+    if (c2 > this.maxC) this.maxC = c2;
+  }
+
+  // Expose the raw cell store + encoder so excelStyles mutators (zebra) work.
+  applyZebra(startRow: number, endRow: number, firstCol: number, lastCol: number): void {
+    zebra(this.cells, (a) => XLSX.utils.encode_cell(a), startRow, endRow, firstCol, lastCol);
+  }
+
+  toWS(): XLSX.WorkSheet {
+    const ws: XLSX.WorkSheet = { ...this.cells };
+    ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: this.maxR, c: this.maxC } });
+    if (this.merges.length) ws['!merges'] = this.merges;
+    if (this.cols.length) ws['!cols'] = this.cols;
+    if (this.freeze) ws['!freeze'] = { xSplit: this.freeze.c, ySplit: this.freeze.r } as any;
+    if (this.autofilter) ws['!autofilter'] = { ref: this.autofilter };
+    return ws;
+  }
+}
+
