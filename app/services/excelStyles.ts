@@ -32,6 +32,9 @@ export const PALETTE = {
   srcInput: '1D4ED8', // blue   = hardcoded input
   srcFormula: '000000', // black  = formula / derived
   srcLink: '047857', // green  = cross-sheet link
+  // Error band (statement does not balance)
+  error: 'B91C1C', // red 700
+  errorText: 'FFFFFF',
   // Generic
   text: '0F172A',
   muted: '64748B',
@@ -171,6 +174,13 @@ export const grandTotalNumberStyle = (z: string = NUMFMT.accounting): Style => (
 });
 
 // Internal hyperlink (note-reference / index / back-links): link-blue underline.
+/** Loud banner used when a statement fails its own balance check. */
+export const errorBandStyle = (): Style => ({
+  font: font({ bold: true, color: PALETTE.errorText }),
+  fill: fill(PALETTE.error),
+  alignment: { ...ALIGN.left, wrapText: true },
+});
+
 export const linkStyle = (alignment: Style = ALIGN.center): Style => ({
   font: font({ color: PALETTE.link, underline: true }),
   alignment,

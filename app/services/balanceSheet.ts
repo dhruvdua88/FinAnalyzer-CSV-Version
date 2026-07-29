@@ -206,6 +206,14 @@ export interface BranchData {
   closingStockOverride: number | null;
   // Diagnostics surfaced to the UI
   unclassified: Array<{ name: string; rawPrimary: string; closing: number }>;
+  diagnostics: BsDiagnostic[];
+}
+
+export interface BsDiagnostic {
+  severity: 'error' | 'warn';
+  code: string;
+  message: string;
+  ledger?: string;
 }
 
 const safeNum = (v: any): number => {
@@ -244,13 +252,17 @@ export const buildBranchFromStore = (
     movements.set(key, (movements.get(key) || 0) + safeNum(line.amount));
   }
 
-  // P&L A/c — Tally synthesises it; read its balances directly.
+  // P&L A/c — Tally leaves closing_balance at 0 for this synthesised ledger, so
+  // read it the same way as every other ledger: opening + voucher movements.
+  // This ledger carries the contra of the year-end transfer JV when the client
+  // has posted one, and it is the sole reason a raw Tally trial balance appears
+  // not to sum to zero.
   let pnlBalance = 0;
   let pnlOpening = 0;
   const pnlLedger = store.ledgers.get(nameKey('Profit & Loss A/c'));
   if (pnlLedger) {
-    pnlBalance = safeNum(pnlLedger.closing_balance);
     pnlOpening = safeNum(pnlLedger.opening_balance);
+    pnlBalance = pnlOpening + (movements.get(nameKey('Profit & Loss A/c')) || 0);
   }
 
   // First pass: collect the parent sub-groups seen under each raw primary group,
@@ -282,7 +294,8 @@ export const buildBranchFromStore = (
       ? opening + (movements.get(mvKey) || 0)
       : safeNum(ledger.closing_balance);
 
-    // Excluded groups are dropped from the statement entirely (absorbed by the plug).
+    // Excluded groups leave the statement entirely; this CAN unbalance it, which
+    // is why every exclusion is reported as a diagnostic.
     if (res.how === 'excluded') continue;
 
     ledgers.push({
@@ -330,34 +343,50 @@ export const buildBranchFromStore = (
     openingStockOverride: null,
     closingStockOverride: null,
     unclassified,
+    diagnostics: [],
   };
 
-  resolveOpeningStockSource(branch);
+  reportStockRegisterMismatch(branch);
+  assertBranchInvariants(branch);
   return branch;
 };
 
-// Opening-stock source self-correction.
-// Tally's Stock-in-Hand ledger opening_balance (the trial-balance figure) can be
-// stale relative to the stock register's opening_value. When the rest of the
-// opening trial balance only ties to zero if opening stock equals the register
-// figure, the ledger opening leaves a one-sided opening difference (the plug).
-// So: try the register opening; keep it ONLY if it strictly shrinks the
-// auto-balance plug, otherwise fall back to the ledger (trial-balance) opening.
-// Closing stock is never touched here.
-const resolveOpeningStockSource = (b: BranchData): void => {
+// The stock register is a memorandum record. Where it disagrees with the
+// Stock-in-Hand ledger, report it — never silently substitute one for the other,
+// which would put a one-sided amount on the balance sheet.
+const reportStockRegisterMismatch = (b: BranchData): void => {
   if (b.stockItems.length === 0) return;
-  const ledgerOpen = -sumOpening(b, 'Stock-in-hand');
-  const registerOpen = stockItemsOpeningTotal(b);
-  if (Math.abs(registerOpen - ledgerOpen) < 0.5) return; // same source — nothing to decide
+  for (const [label, register, ledger] of [
+    ['Opening', stockItemsOpeningTotal(b), openingStock(b)],
+    ['Closing', stockItemsClosingTotal(b), closingStock(b)],
+  ] as Array<[string, number, number]>) {
+    if (Math.abs(register - ledger) <= 0.5) continue;
+    b.diagnostics.push({
+      severity: 'warn',
+      code: 'STOCK_REGISTER_MISMATCH',
+      message:
+        `${label} stock per the stock register (${register.toFixed(2)}) does not agree with the ` +
+        `Stock-in-Hand ledger (${ledger.toFixed(2)}); difference ${(register - ledger).toFixed(2)}. ` +
+        `The balance sheet uses the ledger figure.`,
+    });
+  }
+};
 
-  b.openingStockOverride = ledgerOpen;
-  const plugLedger = Math.abs(bsReconciliation(b));
-  b.openingStockOverride = registerOpen;
-  const plugRegister = Math.abs(bsReconciliation(b));
-
-  // Register wins only when it brings the BS materially closer to balancing;
-  // null restores the default ledger-first resolution in openingStock().
-  b.openingStockOverride = plugRegister < plugLedger - 0.5 ? registerOpen : null;
+/**
+ * The balance sheet must close on its own arithmetic. A non-zero difference is a
+ * classification or data defect to be surfaced, never a figure to be plugged.
+ */
+export const assertBranchInvariants = (b: BranchData): void => {
+  const diff = bsReconciliation(b);
+  if (Math.abs(diff) > 0.005) {
+    b.diagnostics.push({
+      severity: 'error',
+      code: 'BALANCE_BROKEN',
+      message:
+        `Balance sheet does not balance: Assets − Equity & Liabilities = ${diff.toFixed(2)}. ` +
+        `Review ledger classification and any excluded groups before issuing this statement.`,
+    });
+  }
 };
 
 // ─── Primary-group catalogue (drives the mapping UI) ───────────────────────────
@@ -421,7 +450,7 @@ export const consolidateBranches = (branches: BranchData[]): BranchData => {
   const openingStockSum = branches.reduce((a, b) => a + openingStock(b), 0);
   const closingStockSum = branches.reduce((a, b) => a + closingStock(b), 0);
 
-  return {
+  const consolidated: BranchData = {
     branchName: 'Consolidated',
     company: branches.map((b) => b.company).join(' + '),
     periodFrom: branches[0].periodFrom,
@@ -436,7 +465,13 @@ export const consolidateBranches = (branches: BranchData[]): BranchData => {
     unclassified: branches.flatMap((b) =>
       b.unclassified.map((u) => ({ ...u, name: `${u.name} (${b.branchName})` })),
     ),
+    diagnostics: branches.flatMap((b) =>
+      b.diagnostics.map((d) => ({ ...d, message: `[${b.branchName}] ${d.message}` })),
+    ),
   };
+
+  assertBranchInvariants(consolidated);
+  return consolidated;
 };
 
 /** True when all branches cover the same period; consolidation is only sound then. */
@@ -465,18 +500,15 @@ const stockItemsClosingTotal = (b: BranchData) =>
 const stockItemsOpeningTotal = (b: BranchData) =>
   b.stockItems.reduce((s, si) => s + -si.openingValue, 0);
 
-export const closingStock = (b: BranchData): number => {
-  if (b.closingStockOverride !== null) return b.closingStockOverride;
-  const fromLedgers = -sumClosing(b, 'Stock-in-hand');
-  if (Math.abs(fromLedgers) > 0.5 || b.stockItems.length === 0) return fromLedgers;
-  return stockItemsClosingTotal(b);
-};
-export const openingStock = (b: BranchData): number => {
-  if (b.openingStockOverride !== null) return b.openingStockOverride;
-  const fromLedgers = -sumOpening(b, 'Stock-in-hand');
-  if (Math.abs(fromLedgers) > 0.5 || b.stockItems.length === 0) return fromLedgers;
-  return stockItemsOpeningTotal(b);
-};
+// Inventory on the balance sheet comes from the Stock-in-Hand LEDGER only.
+// The stock register is a memorandum record: when it disagrees with the ledger
+// that is an audit finding (emitted as STOCK_REGISTER_MISMATCH), not an input.
+// Taking the register figure whenever the ledger was nil used to inject a
+// one-sided amount into assets with no matching credit.
+export const closingStock = (b: BranchData): number =>
+  b.closingStockOverride !== null ? b.closingStockOverride : -sumClosing(b, 'Stock-in-hand');
+export const openingStock = (b: BranchData): number =>
+  b.openingStockOverride !== null ? b.openingStockOverride : -sumOpening(b, 'Stock-in-hand');
 
 // Fixed assets net (gross debit balances less accumulated depreciation credit)
 export const netFixedAssets = (b: BranchData): number => {
@@ -499,19 +531,36 @@ export const shareCapital = (b: BranchData): number => {
   }
   return total;
 };
+/** Net closing of every ledger that belongs to the P&L (credit positive). */
+const pnlLedgerSum = (b: BranchData): number =>
+  b.ledgers.reduce((s, l) => (PNL_PRIMARY_GROUPS.has(l.primary) ? s + l.closing : s), 0);
+
+/**
+ * The amount of surplus that still has to be carried into Reserves.
+ *
+ *   surplusTransfer = Σ(P&L-group ledger closings) + P&L A/c ledger balance
+ *
+ * Because every ledger closing sums to zero across the trial balance, this one
+ * formula is correct whether or not the client posted the year-end transfer JV:
+ *
+ *   • JV posted     — the revenue ledgers still carry the profit and the P&L A/c
+ *                     ledger carries its exact contra, so the two cancel and we
+ *                     add 0; the Reserves ledger already holds the profit.
+ *   • JV not posted — the P&L A/c ledger is nil (or holds only prior-year
+ *                     retained earnings) and we carry the profit in.
+ *
+ * The previous code added `pnlOpening + currentYearProfit` unconditionally,
+ * which double-counted the profit for every client who had posted the JV.
+ * Do NOT add `pnlOpening` here — `pnlBalance` already includes it.
+ */
+export const surplusTransfer = (b: BranchData): number => pnlLedgerSum(b) + b.pnlBalance;
+
 export const reservesSurplus = (b: BranchData): number => {
   let res = sumClosing(b, 'Reserves & Surplus');
   for (const l of ledgersFor(b, 'Capital Account')) {
     if (l.name.toLowerCase().includes('reserve')) res += l.closing;
   }
-  // Prior-year retained earnings (P&L A/c opening) + THIS year's voucher-derived
-  // profit. We deliberately use the transaction-derived profit (income − expense
-  // + change in inventory) rather than Tally's synthesised P&L A/c closing
-  // balance: Tally auto-computes that closing without a voucher and it can fail
-  // to reconcile to the underlying transactions, opening a gap on the BS. Using
-  // the voucher-backed profit keeps the P&L tied to the BS, so the only residual
-  // left is a genuine opening-balance difference.
-  res += b.pnlOpening + currentYearProfit(b);
+  res += surplusTransfer(b);
   return res;
 };
 
@@ -570,7 +619,9 @@ export const totalAssets = (b: BranchData): number => totalNonCurrentAssets(b) +
 export const totalEquityLiabilities = (b: BranchData): number =>
   totalEquity(b) + totalNonCurrentLiab(b) + totalCurrentLiab(b);
 
-// Auto-balance plug, shown on the face so the BS always closes.
+// The balance check: Assets − Equity & Liabilities. MUST be 0. A non-zero value
+// means a classification or data defect and is surfaced as an error — it is
+// never shown as a balancing figure on the face of the statement.
 export const bsReconciliation = (b: BranchData): number =>
   totalAssets(b) - totalEquityLiabilities(b);
 // Tally's own booked current-year profit = the movement in the synthesised
@@ -683,7 +734,7 @@ export const profitAfterTax = (b: BranchData): number => profitBeforeTax(b) - ta
 
 // ─── Statement line definitions (drive both single & multi-branch display) ──────
 
-export type LineKind = 'header' | 'line' | 'subtotal' | 'total' | 'plug';
+export type LineKind = 'header' | 'line' | 'subtotal' | 'total';
 
 export interface BsLineDef {
   key: string;
@@ -714,8 +765,7 @@ export const BS_LINE_DEFS: BsLineDef[] = [
   { key: 'provisions', label: 'Short-Term Provisions', kind: 'line', fn: shortTermProvisions, indent: 2 },
   { key: 'total_cl', label: 'Total Current Liabilities', kind: 'subtotal', fn: totalCurrentLiab, indent: 1 },
 
-  { key: 'plug', label: 'Opening Balance Difference (pre-existing / auto-balance)', kind: 'plug', fn: bsReconciliation, indent: 1 },
-  { key: 'total_el', label: 'TOTAL EQUITY & LIABILITIES', kind: 'total', fn: (b) => totalEquityLiabilities(b) + bsReconciliation(b), indent: 0 },
+  { key: 'total_el', label: 'TOTAL EQUITY & LIABILITIES', kind: 'total', fn: totalEquityLiabilities, indent: 0 },
 
   { key: 'A_HEAD', label: 'ASSETS', kind: 'header' },
   { key: 'NCA_HEAD', label: 'Non-Current Assets', kind: 'header', indent: 1 },

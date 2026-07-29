@@ -76,6 +76,7 @@ import {
   SIZE,
   Style,
   columnHeaderStyle,
+  errorBandStyle,
   font,
   fill,
   grandTotalLabelStyle,
@@ -284,6 +285,25 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   };
   const spacer = () => { r++; };
 
+  // A Schedule III balance sheet carries no balancing figure. If the statement
+  // does not close on its own arithmetic, say so loudly instead of hiding it in
+  // a plug line.
+  const outOfBalance = columns.filter((c) => Math.abs(bsReconciliation(c.data)) > 0.5);
+  if (outOfBalance.length > 0) {
+    const detail = outOfBalance
+      .map((c) => `${c.name}: ${Math.round(bsReconciliation(c.data)).toLocaleString('en-IN')}`)
+      .join('   |   ');
+    bs.merge(r, 0, lastCol);
+    bs.set(
+      r,
+      0,
+      `⚠  DOES NOT BALANCE — Assets − Equity & Liabilities ≠ 0   (${detail}).  ` +
+        `Review ledger classification and excluded groups before issuing this statement.`,
+      { s: errorBandStyle(), num: false },
+    );
+    r += 2;
+  }
+
   subheader(bs, "I.  SHAREHOLDERS' FUNDS");
   line('  a)  Share Capital', shareCapital, { note: 1 });
   line('  b)  Reserves & Surplus', reservesSurplus, { note: 2 });
@@ -302,9 +322,7 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   line('  e)  Short-Term Provisions', shortTermProvisions, { note: 7 });
   line('Total Current Liabilities', totalCurrentLiab, { total: true });
   spacer();
-  line('  f)  Opening Balance Difference  (pre-existing / auto-balance)', bsReconciliation, { muted: true, italic: true });
-  spacer();
-  line('TOTAL EQUITY & LIABILITIES', (b) => totalEquityLiabilities(b) + bsReconciliation(b), { grand: true });
+  line('TOTAL EQUITY & LIABILITIES', totalEquityLiabilities, { grand: true });
   spacer();
   spacer();
   subheader(bs, 'I.  NON-CURRENT ASSETS');
@@ -323,8 +341,6 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   line('Total Current Assets', totalCurrentAssets, { total: true });
   spacer();
   line('TOTAL ASSETS', totalAssets, { grand: true });
-  spacer();
-  line('Balance Sheet Difference  (Assets − Equity & Liabilities)', (b) => totalAssets(b) - totalEquityLiabilities(b) - bsReconciliation(b), { muted: true, italic: true });
 
   bs.freeze = { r: headerRow + 1, c: firstValCol };
   XLSX.utils.book_append_sheet(wb, bs.toWS(), BS_SHEET);

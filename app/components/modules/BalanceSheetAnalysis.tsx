@@ -6,6 +6,7 @@ import {
   BS_MAP,
   BsLineDef,
   BranchData,
+  bsReconciliation,
   buildBranchFromStore,
   buildReport,
   collectPrimaryGroups,
@@ -132,7 +133,6 @@ const BalanceSheetAnalysis: React.FC = () => {
     const head = ['Particulars', ...report.columns.map((c) => c.branchName)];
     const rows: (string | number)[][] = [head];
     for (const { def, values } of report.lines) {
-      if (def.kind === 'plug' && values.every((v) => Math.round(v) === 0)) continue;
       const indent = '   '.repeat(def.indent || 0);
       rows.push([
         indent + def.label,
@@ -177,12 +177,13 @@ const BalanceSheetAnalysis: React.FC = () => {
     XLSX.writeFile(wb, `Financial_Statements_${co}_${stamp}.xlsx`, { compression: true, cellStyles: true });
   };
 
-  const materialPlug = report
-    ? report.lines.find((l) => l.def.key === 'plug')?.values.some((v, i) => {
-        const ta = Math.abs(report.lines.find((x) => x.def.key === 'total_assets')!.values[i]);
-        return ta < 1 ? Math.abs(v) > 1 : (Math.abs(v) / ta) * 100 > 1;
-      })
-    : false;
+  // A Schedule III balance sheet carries no balancing figure. If a column does
+  // not close on its own arithmetic that is a defect to surface, not to plug.
+  const outOfBalance = report
+    ? report.columns
+        .map((c) => ({ branch: c.branchName, diff: bsReconciliation(c.data) }))
+        .filter((x) => Math.abs(x.diff) > 0.5)
+    : [];
 
   const allUnclassified = useMemo(
     () => branchData.flatMap((b) => b.unclassified.map((u) => ({ ...u, branch: b.branchName }))),
@@ -366,18 +367,19 @@ const BalanceSheetAnalysis: React.FC = () => {
         </div>
       )}
 
-      {materialPlug && (
-        <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700 px-4 py-3 text-sm text-amber-800 dark:text-amber-300 flex gap-2">
+      {outOfBalance.length > 0 && (
+        <div className="rounded-md border border-red-300 bg-red-50 dark:bg-red-900/20 dark:border-red-700 px-4 py-3 text-sm text-red-800 dark:text-red-300 flex gap-2">
           <AlertTriangle size={16} className="mt-0.5 shrink-0" />
           <span>
-            A material year-end reconciliation plug (&gt;1% of total assets) was needed to balance.
-            This usually means Tally booked year-end adjustments (stock revaluation, forex, rounding)
-            outside the accounting vouchers. The figure is shown on the face below.
+            <strong>Balance Sheet does not balance.</strong> Assets &minus; Equity &amp; Liabilities ={' '}
+            {outOfBalance.map((x) => `${x.branch}: ${Math.round(x.diff).toLocaleString('en-IN')}`).join(', ')}.
+            Review the ledger classification and any excluded groups below — the statement must not be
+            issued until this is nil.
           </span>
         </div>
       )}
 
-      {report && unmappedCount === 0 && !materialPlug && report.periodsMatch && (
+      {report && unmappedCount === 0 && outOfBalance.length === 0 && report.periodsMatch && (
         <div className="rounded-md border border-emerald-300 bg-emerald-50 dark:bg-emerald-900/20 dark:border-emerald-700 px-4 py-2 text-sm text-emerald-700 dark:text-emerald-300 flex gap-2 items-center">
           <CheckCircle2 size={16} /> All groups mapped and the balance sheet balances.
         </div>
@@ -438,13 +440,11 @@ const BalanceSheetAnalysis: React.FC = () => {
                 }
                 const isTotal = def.kind === 'total';
                 const isSub = def.kind === 'subtotal';
-                const isPlug = def.kind === 'plug';
-                if (isPlug && values.every((v) => Math.round(v) === 0)) return null;
                 return (
                   <tr
                     key={def.key}
                     className={`border-t border-slate-100 dark:border-slate-700/60 ${
-                      isTotal ? 'bg-slate-50 dark:bg-slate-800 font-bold' : isSub ? 'font-semibold' : isPlug ? 'text-amber-700 dark:text-amber-400 italic' : ''
+                      isTotal ? 'bg-slate-50 dark:bg-slate-800 font-bold' : isSub ? 'font-semibold' : ''
                     }`}
                   >
                     <td className="px-4 py-2 text-slate-700 dark:text-slate-200" style={{ paddingLeft: `${1 + (def.indent || 0) * 0.75}rem` }}>
@@ -475,8 +475,8 @@ const BalanceSheetAnalysis: React.FC = () => {
             Unclassified ledgers ({allUnclassified.length})
           </h3>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            These ledgers' primary group did not map to a Schedule III head. Map the group above, or
-            their balances stay out of the face and are absorbed by the reconciliation plug.
+            These ledgers' primary group did not map to a Schedule III head. Map the group above so
+            they land on the correct line — until then they are reported here rather than on the face.
           </p>
           <div className="mt-2 max-h-48 overflow-y-auto text-xs">
             <table className="min-w-full">
