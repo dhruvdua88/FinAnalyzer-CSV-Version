@@ -113,8 +113,9 @@ const main = async () => {
       check('accumulated depreciation ledgers detected', contras.length, E.contraFaCount, 0);
       check('accumulated depreciation total', contras.reduce((s: number, l: any) => s + l.closing, 0), E.contraFaTotal, 1);
     }
-    check('net fixed assets (PPE + CWIP)',
-      lineSum(branch, 'ppe') + lineSum(branch, 'cwip'), E.netFixedAssetsInclCwip, 1);
+    check('net fixed assets (PPE + intangibles + CWIP)',
+      ['ppe', 'intangibles', 'cwip', 'intangibles_dev'].reduce((s, id) => s + lineSum(branch, id), 0),
+      E.netFixedAssetsInclCwip, 1);
     checkTrue('duties & taxes not netted into one liability',
       lineSum(branch, 'duties_taxes_payable') >= 0 && lineSum(branch, 'st_loans_advances') >= 0);
     checkTrue('no negative asset or liability totals on the face',

@@ -30,7 +30,24 @@ import {
   deferredTaxLiability,
   depreciationFromFA,
   directExpenses,
-  dutiesAndTaxesNet,
+  dutiesTaxesPayable,
+  employeeDues,
+  advancesFromCustomers,
+  shortTermLoansAdvances,
+  cwipTotal,
+  intangibleAssets,
+  intangiblesUnderDevelopment,
+  tradePayablesMsme,
+  tradePayablesOther,
+  unclassifiedCr,
+  unclassifiedDr,
+  currentInvestments,
+  otherLongTermLiabilities,
+  longTermProvisions,
+  shareApplicationMoney,
+  depreciation,
+  ledgersForLine,
+  lineSum,
   employeeCosts,
   financeCosts,
   fixedAssetsSchedule,
@@ -307,37 +324,50 @@ export const buildFinancialStatementsWorkbook = (input: FsWorkbookInput): XLSX.W
   subheader(bs, "I.  SHAREHOLDERS' FUNDS");
   line('  a)  Share Capital', shareCapital, { note: 1 });
   line('  b)  Reserves & Surplus', reservesSurplus, { note: 2 });
+  line('  c)  Share Application Money Pending Allotment', shareApplicationMoney);
   line('Total Shareholders’ Funds', totalEquity, { total: true });
   spacer();
   subheader(bs, 'II.  NON-CURRENT LIABILITIES');
   line('  a)  Long-Term Borrowings', longTermBorrowings, { note: 3 });
   line('  b)  Deferred Tax Liability', deferredTaxLiability);
+  line('  c)  Other Long-Term Liabilities', otherLongTermLiabilities);
+  line('  d)  Long-Term Provisions', longTermProvisions);
   line('Total Non-Current Liabilities', totalNonCurrentLiab, { total: true });
   spacer();
   subheader(bs, 'III.  CURRENT LIABILITIES');
-  line('  a)  Short-Term Borrowings', (b) => shortTermBorrowings(b) + bankOdInBankAccounts(b), { note: 4 });
-  line('  b)  Trade Payables', tradePayables, { note: 5 });
-  line('  c)  Duties & Taxes (Net)', dutiesAndTaxesNet);
-  line('  d)  Other Current Liabilities', otherCurrentLiabilities, { note: 6 });
-  line('  e)  Short-Term Provisions', shortTermProvisions, { note: 7 });
+  line('  a)  Short-Term Borrowings', shortTermBorrowings, { note: 4 });
+  line('  b)  Trade Payables — Micro & Small Enterprises', tradePayablesMsme, { note: 5 });
+  line('  c)  Trade Payables — Others', tradePayablesOther, { note: 5 });
+  line('  d)  Statutory Dues Payable', dutiesTaxesPayable);
+  line('  e)  Employee Benefits Payable', employeeDues);
+  line('  f)  Advances from Customers', advancesFromCustomers);
+  line('  g)  Other Current Liabilities', otherCurrentLiabilities, { note: 6 });
+  line('  h)  Short-Term Provisions', shortTermProvisions, { note: 7 });
+  line('  i)  Unclassified — credit balances (REVIEW)', unclassifiedCr);
   line('Total Current Liabilities', totalCurrentLiab, { total: true });
   spacer();
   line('TOTAL EQUITY & LIABILITIES', totalEquityLiabilities, { grand: true });
   spacer();
   spacer();
   subheader(bs, 'I.  NON-CURRENT ASSETS');
-  line('  a)  Fixed Assets (Net Block)', netFixedAssets, { note: 8 });
-  line('  b)  Non-Current Investments', nonCurrentInvestments, { note: 9 });
-  line('  c)  Long-Term Loans & Advances', longTermLoansAdvances, { note: 10 });
-  line('  d)  Deferred Tax Asset', deferredTaxAsset);
-  line('  e)  Other Non-Current Assets', otherNonCurrentAssets);
+  line('  a)  Property, Plant and Equipment', netFixedAssets, { note: 8 });
+  line('  b)  Intangible Assets', intangibleAssets);
+  line('  c)  Capital Work-in-Progress', cwipTotal);
+  line('  d)  Intangible Assets under Development', intangiblesUnderDevelopment);
+  line('  e)  Non-Current Investments', nonCurrentInvestments, { note: 9 });
+  line('  f)  Deferred Tax Asset', deferredTaxAsset);
+  line('  g)  Long-Term Loans & Advances', longTermLoansAdvances, { note: 10 });
+  line('  h)  Other Non-Current Assets', otherNonCurrentAssets);
   line('Total Non-Current Assets', totalNonCurrentAssets, { total: true });
   spacer();
   subheader(bs, 'II.  CURRENT ASSETS');
-  line('  a)  Inventories (Closing Stock)', closingStock, { note: 11 });
-  line('  b)  Trade Receivables', tradeReceivables, { note: 12 });
-  line('  c)  Cash & Cash Equivalents', cashAndBank, { note: 13 });
-  line('  d)  Other Current Assets', otherCurrentAssets, { note: 14 });
+  line('  a)  Current Investments', currentInvestments);
+  line('  b)  Inventories (Closing Stock)', closingStock, { note: 11 });
+  line('  c)  Trade Receivables', tradeReceivables, { note: 12 });
+  line('  d)  Cash & Cash Equivalents', cashAndBank, { note: 13 });
+  line('  e)  Short-Term Loans & Advances', shortTermLoansAdvances);
+  line('  f)  Other Current Assets', otherCurrentAssets, { note: 14 });
+  line('  g)  Unclassified — debit balances (REVIEW)', unclassifiedDr);
   line('Total Current Assets', totalCurrentAssets, { total: true });
   spacer();
   line('TOTAL ASSETS', totalAssets, { grand: true });
