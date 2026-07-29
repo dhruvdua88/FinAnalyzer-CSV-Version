@@ -14,7 +14,8 @@
     "package:exe:stage": "node sea/build-sea.cjs --stage-only",
     "tauri:prepare": "node scripts/prepare-tauri-node.cjs",
     "tauri:dev": "cmd /c \"set NODE_OPTIONS=--no-deprecation&& set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri dev\"",
-    "tauri:build": "cmd /c \"set NODE_OPTIONS=--no-deprecation&& set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri build\""
+    "tauri:build": "cmd /c \"set NODE_OPTIONS=--no-deprecation&& set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri build\"",
+    "validate:fs": "tsx scripts/validateStatements.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.100.5",

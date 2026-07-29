@@ -13,7 +13,7 @@ import {
   EXCLUDE_TARGET,
   PNL_LINE_DEFS,
   ReclassifyMap,
-  STANDARD_PRIMARY_OPTIONS,
+  SCH3_LINE_OPTIONS,
 } from '../../services/balanceSheet';
 import { buildFinancialStatementsWorkbook } from '../../services/financialStatementsExcel';
 import { ageParties, mergeAgeing } from '../../services/ageingFifo';
@@ -181,12 +181,18 @@ const BalanceSheetAnalysis: React.FC = () => {
   // not close on its own arithmetic that is a defect to surface, not to plug.
   const outOfBalance = report
     ? report.columns
-        .map((c) => ({ branch: c.branchName, diff: bsReconciliation(c.data) }))
+        .map((c) => ({ branch: c.branchName, diff: bsReconciliation(c) }))
         .filter((x) => Math.abs(x.diff) > 0.5)
     : [];
 
   const allUnclassified = useMemo(
     () => branchData.flatMap((b) => b.unclassified.map((u) => ({ ...u, branch: b.branchName }))),
+    [branchData],
+  );
+
+  // Anything the engine wants a human to look at before the statement is issued.
+  const diagnostics = useMemo(
+    () => branchData.flatMap((b) => b.diagnostics.map((d) => ({ ...d, branch: b.branchName }))),
     [branchData],
   );
 
@@ -337,15 +343,18 @@ const BalanceSheetAnalysis: React.FC = () => {
                           className="rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-xs px-1 py-0.5 text-slate-700 dark:text-slate-200"
                         >
                           <option value="">Auto ({r.classified ? r.primary : 'unmapped'})</option>
-                          {STANDARD_PRIMARY_OPTIONS.map((grp) => (
+                          {SCH3_LINE_OPTIONS.map((grp) => (
                             <optgroup key={grp.group} label={grp.group}>
                               {grp.options.map((opt) => (
-                                <option key={opt} value={opt}>
-                                  {opt === EXCLUDE_TARGET ? 'Exclude from statement' : opt}
+                                <option key={opt.id} value={opt.id}>
+                                  {opt.label}
                                 </option>
                               ))}
                             </optgroup>
                           ))}
+                          <optgroup label="Other">
+                            <option value={EXCLUDE_TARGET}>Exclude from statement</option>
+                          </optgroup>
                         </select>
                       </td>
                     </tr>
@@ -465,6 +474,34 @@ const BalanceSheetAnalysis: React.FC = () => {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {diagnostics.length > 0 && (
+        <div className="rounded-md border border-slate-200 dark:border-slate-700 p-4">
+          <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2">
+            <AlertTriangle size={15} className="text-amber-500" />
+            Review before issuing ({diagnostics.length})
+          </h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+            These do not stop the statement balancing, but each one is a judgement a person has to make.
+          </p>
+          <ul className="mt-2 space-y-1.5 text-xs max-h-56 overflow-y-auto">
+            {diagnostics.map((d, i) => (
+              <li key={i} className="flex gap-2">
+                <span
+                  className={`shrink-0 rounded px-1.5 py-0.5 font-bold ${
+                    d.severity === 'error'
+                      ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                      : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+                  }`}
+                >
+                  {d.code}
+                </span>
+                <span className="text-slate-600 dark:text-slate-300">{d.message}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
