@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FinAnalyzer Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      // Dark mode MUST be class-based: the app toggles `.dark` on <html>.
+      // This config has to be set AFTER the CDN script loads — assigning it
+      // before is discarded when the CDN initialises window.tailwind, which
+      // then defaults to the `media` strategy and makes `dark:` text colours
+      // fire on a light background (invisible text) when the OS is in dark mode.
+      tailwind.config = { darkMode: 'class' };
+    </script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      body { font-family: 'Inter', sans-serif; }
+      /* Custom scrollbar */
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: #f1f5f9; }
+      ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+      /* Dark mode overrides for components that use inline Tailwind classes */
+      html.dark body { background-color: #0f172a; color: #e2e8f0; }
+      html.dark ::-webkit-scrollbar-track { background: #1e293b; }
+      html.dark ::-webkit-scrollbar-thumb { background: #475569; }
+      html.dark .bg-white { background-color: #1e293b !important; }
+      html.dark .bg-slate-50 { background-color: #0f172a !important; }
+      html.dark .bg-slate-100 { background-color: #1e293b !important; }
+      html.dark .border-slate-200 { border-color: #334155 !important; }
+      html.dark .text-slate-900 { color: #f1f5f9 !important; }
+      html.dark .text-slate-800 { color: #e2e8f0 !important; }
+      html.dark .text-slate-700 { color: #cbd5e1 !important; }
+      html.dark .text-slate-600 { color: #94a3b8 !important; }
+      html.dark .text-slate-500 { color: #64748b !important; }
+      html.dark .shadow-sm { box-shadow: 0 1px 2px 0 rgba(0,0,0,0.4) !important; }
+    </style>
+  <script type="module" crossorigin src="/FinAnalyzer-CSV-Version/assets/index-CELChRFI.js"></script>
+  <link rel="modulepreload" crossorigin href="/FinAnalyzer-CSV-Version/assets/charts-c-5S7J-B.js">
+  <link rel="modulepreload" crossorigin href="/FinAnalyzer-CSV-Version/assets/parsing-tz_dc7Oz.js">
+</head>
+  <body class="bg-slate-50 text-slate-900 antialiased">
+    <div id="root"></div>
+</body>
+</html>
