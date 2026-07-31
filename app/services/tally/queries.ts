@@ -286,14 +286,14 @@ export const getPurchaseITCRegister = (
     const expLines = lines.filter((l) => l.primary != null);
 
     const sumOfType = (rows: AnnotatedLine[], kind: 'IGST' | 'CGST' | 'SGST') =>
-      Math.abs(rows.filter((l) => l.gstType === kind).reduce((s, l) => s + l.amount, 0));
+      rows.filter((l) => l.gstType === kind).reduce((s, l) => s + l.amount, 0);
 
     const igst = sumOfType(gstLines, 'IGST') + sumOfType(rcmInputs, 'IGST');
     const cgst = sumOfType(gstLines, 'CGST') + sumOfType(rcmInputs, 'CGST');
     const sgst = sumOfType(gstLines, 'SGST') + sumOfType(rcmInputs, 'SGST');
     const tax = igst + cgst + sgst;
 
-    const taxable = Math.abs(expLines.reduce((s, l) => s + l.amount, 0));
+    const taxable = expLines.reduce((s, l) => s + l.amount, 0);
 
     // Deduped expense-ledger list in source order
     const seen = new Set<string>();

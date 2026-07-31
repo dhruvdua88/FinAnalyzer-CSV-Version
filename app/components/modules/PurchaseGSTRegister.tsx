@@ -10,7 +10,7 @@
 // deferred to Stage 4 of the refactor.
 
 import React, { useMemo, useState, useEffect } from 'react';
-import { Download, AlertCircle, AlertTriangle, FileWarning, ShieldAlert, Search, Settings2 } from 'lucide-react';
+import { Download, AlertCircle, AlertTriangle, FileWarning, ShieldAlert, Search, Settings2, FileText } from 'lucide-react';
 import { LedgerEntry } from '../../types';
 import {
   getPurchaseITCRegister,
@@ -140,6 +140,33 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
     }
     return { taxable, igst, cgst, sgst, tax, count: visibleRows.length };
   }, [visibleRows]);
+
+  const handleExportMD = () => {
+    if (allRows.length === 0) return;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const company = store?.meta.companyName || 'Company';
+    const lines: string[] = [];
+    lines.push(`# Purchase GST Register — ${company}`);
+    lines.push(`**Exported:** ${new Date().toLocaleString('en-IN')}`);
+    if (dateFrom || dateTo) lines.push(`**Period:** ${dateFrom || 'start'} to ${dateTo || 'end'}`);
+    lines.push(`**Total Vouchers:** ${allRows.length}`);
+    lines.push('');
+    lines.push('| # | Date | Voucher | Party | GSTIN | Type | Taxable (₹) | IGST (₹) | CGST (₹) | SGST (₹) | Total Tax (₹) |');
+    lines.push('|---:|------|---------|-------|-------|------|------------:|---------:|---------:|---------:|--------------:|');
+    for (let i = 0; i < allRows.length; i++) {
+      const r = allRows[i];
+      lines.push(`| ${i + 1} | ${r.date} | ${r.vchNo || r.voucherNumber} | ${r.partyName} | ${r.partyGstinUin || '—'} | ${r.type} | ${r.taxable.toFixed(2)} | ${r.igst.toFixed(2)} | ${r.cgst.toFixed(2)} | ${r.sgst.toFixed(2)} | ${r.tax.toFixed(2)} |`);
+    }
+    lines.push('');
+    lines.push('---');
+    lines.push(`**Grand Totals** | Taxable: ${totals.taxable.toFixed(2)} | IGST: ${totals.igst.toFixed(2)} | CGST: ${totals.cgst.toFixed(2)} | SGST: ${totals.sgst.toFixed(2)} | Tax: ${totals.tax.toFixed(2)}`);
+    lines.push(`*Negative values indicate credit notes / debit notes / GST credits.*`);
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `Purchase_Register_ITC_${stamp}.md`; a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const handleExport = async () => {
     if (!store || allRows.length === 0) return;
@@ -751,6 +778,11 @@ const PurchaseGSTRegister: React.FC<PurchaseGSTRegisterProps> = ({ data }) => {
           }`}>
           <Settings2 size={13} />
           GST Ledgers ({selectedSet.size}{gstSelection !== null ? ' · custom' : ''})
+        </button>
+        <button onClick={handleExportMD}
+          className="px-4 py-2 inline-flex items-center gap-2 text-sm font-bold rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shadow-sm">
+          <FileText size={16} />
+          Export MD
         </button>
         <button onClick={handleExport} disabled={isExporting}
           className="px-4 py-2 inline-flex items-center gap-2 text-sm font-bold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:bg-slate-300 transition-colors shadow-sm">
