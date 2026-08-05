@@ -981,126 +981,50 @@ const CashFlowAnalysis: React.FC<CashFlowAnalysisProps> = ({ data }) => {
     if (filteredRows.length === 0) return;
 
     try {
-      const XLSX = await import('xlsx');
+      const XLSX = (await import('xlsx-js-style')).default;
+      const { buildCashFlowWorkbook, cashFlowSheetPolish } = await import('../../services/cashFlowExcel');
+      const { polishXlsx, downloadPolished } = await import('../../services/xlsxPolish');
 
-      const summaryRows = ledgerDetailRows.map((row) => ({
-        'Opposite Ledger': row.label,
-        Activity: row.activity,
-        'Classification Rule': row.classificationRule,
-        'Opposite Primary': row.primary,
-        'Opposite Parent': row.parent,
-        Inflow: row.inflow,
-        Outflow: row.outflow,
-        Net: row.net,
-        'Inflow Share %': row.inflowShare,
-        'Outflow Share %': row.outflowShare,
-        Vouchers: row.vouchers,
-      }));
-
-      const primaryRows = flowModel.byOppositePrimary.map((row) => ({
-        'Opposite Primary': row.label,
-        Inflow: row.inflow,
-        Outflow: row.outflow,
-        Net: row.net,
-        Vouchers: row.vouchers,
-      }));
-
-      const monthRows = flowModel.monthlySeries.map((row) => ({
-        Month: row.monthLabel,
-        Inflow: row.inflow,
-        Outflow: row.outflow,
-        Net: row.inflow - row.outflow,
-      }));
-
-      const cashPositionRows = [
-        {
-          'Period From': fromDate ? toDDMMYYYY(fromDate) : '-',
-          'Period To': toDate ? toDDMMYYYY(toDate) : '-',
-          'Opening Cash Position': flowModel.cashPosition.opening,
-          'Period Cash Movement': flowModel.cashPosition.periodMovement,
-          'Computed Closing Cash': flowModel.cashPosition.closing,
-          'Reference Closing Cash': flowModel.cashPosition.referenceClosing ?? '',
-          'Reconciliation Difference': flowModel.cashPosition.reconciliationDiff ?? '',
+      const workbook = buildCashFlowWorkbook({
+        companyTitle: store?.meta?.companyName || 'Cash Flow Analysis',
+        fromDate: fromDate ? toDDMMYYYY(fromDate) : '-',
+        toDate: toDate ? toDDMMYYYY(toDate) : '-',
+        cashLedgers: selectedCashLedgers,
+        filters: { search: mainSearch, direction: directionFilter, minAmount },
+        statement: {
+          buckets: cashFlowStatement.buckets,
+          byActivity: cashFlowStatement.byActivity,
+          adjustmentNet: cashFlowStatement.adjustmentNet,
+          opening: cashFlowStatement.opening,
+          movement: cashFlowStatement.movement,
+          closing: cashFlowStatement.closing,
         },
-      ];
-
-      const statementRows: Record<string, any>[] = [];
-      const activities: CashFlowActivity[] = ['Operating', 'Investing', 'Financing'];
-
-      activities.forEach((activity) => {
-        statementRows.push({
-          Line: `${activity} Activities`,
-          Inflow: '',
-          Outflow: '',
-          Net: '',
-        });
-
-        cashFlowStatement.buckets
-          .filter((bucket) => bucket.activity === activity)
-          .forEach((bucket) => {
-            statementRows.push({
-              Line: bucket.bucket,
-              Inflow: bucket.inflow,
-              Outflow: bucket.outflow,
-              Net: bucket.net,
-            });
-          });
-
-        statementRows.push({
-          Line: `Net Cash From ${activity} Activities`,
-          Inflow: cashFlowStatement.byActivity[activity].inflow,
-          Outflow: cashFlowStatement.byActivity[activity].outflow,
-          Net: cashFlowStatement.byActivity[activity].net,
-        });
+        cashPosition: flowModel.cashPosition,
+        cashLedgerDetail,
+        ledgerDetailRows,
+        primaryRows: flowModel.byOppositePrimary,
+        monthlySeries: flowModel.monthlySeries,
+        totals: {
+          inflow: summary.inflow,
+          outflow: summary.outflow,
+          net: summary.net,
+          voucherCount: summary.voucherCount,
+          visibleRows: summary.visibleRows,
+          blockedCapitalOutflow: summary.blockedCapitalOutflow,
+        },
       });
 
-      statementRows.push({
-        Line: 'Unclassified/Contra Adjustment',
-        Inflow: '',
-        Outflow: '',
-        Net: cashFlowStatement.adjustmentNet,
-      });
-      statementRows.push({
-        Line: 'Net Increase/(Decrease) in Cash',
-        Inflow: '',
-        Outflow: '',
-        Net: cashFlowStatement.movement,
-      });
-      statementRows.push({
-        Line: 'Opening Cash & Cash Equivalents',
-        Inflow: '',
-        Outflow: '',
-        Net: cashFlowStatement.opening,
-      });
-      statementRows.push({
-        Line: 'Closing Cash & Cash Equivalents',
-        Inflow: '',
-        Outflow: '',
-        Net: cashFlowStatement.closing,
-      });
+      // Freeze panes, gridlines and page setup are spliced in after the write —
+      // xlsx-js-style accepts them and then drops them.
+      const raw = XLSX.write(workbook, { type: 'array', bookType: 'xlsx', cellStyles: true }) as ArrayBuffer;
+      const polished = await polishXlsx(raw, cashFlowSheetPolish(),
+        { showGridLines: false, landscape: true, fitToWidth: true });
 
-      const cashLedgerRows = cashLedgerDetail.map((row) => ({
-        'Cash Ledger': row.ledger,
-        Opening: row.opening,
-        Inflow: row.inflow,
-        Outflow: row.outflow,
-        'Net Movement': row.netMovement,
-        Closing: row.closing,
-        'Reference Closing': row.referenceClosing ?? '',
-        Diff: row.diff ?? '',
-      }));
-
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(summaryRows), 'Ledger Flow Summary');
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(cashLedgerRows), 'Cash Ledger Movement');
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(statementRows), 'Cash Flow Statement');
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(primaryRows), 'Opposite Primary Summary');
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(monthRows), 'Monthly Trend');
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(cashPositionRows), 'Cash Position');
-
-      XLSX.writeFile(workbook, `Cash_Flow_Analysis_${new Date().toISOString().slice(0, 10)}.xlsx`, {
-        compression: true,
-      });
+      const stamp = fromDate && toDate
+        ? `${fromDate.replace(/-/g, '')}_${toDate.replace(/-/g, '')}`
+        : new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const company = (store?.meta?.companyName || 'Company').replace(/[^A-Za-z0-9]+/g, '_').slice(0, 40);
+      downloadPolished(polished, `Cash_Flow_${company}_${stamp}.xlsx`);
     } catch (error) {
       console.error(error);
       window.alert('Unable to export Cash Flow analysis. Please retry.');
