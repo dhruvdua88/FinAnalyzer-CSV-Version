@@ -48,6 +48,10 @@ const sheetViewsXml = (p: SheetPolish): string =>
   `<sheetViews><sheetView showGridLines="${p.showGridLines === false ? 0 : 1}" workbookViewId="0">`
   + `${p.freeze ? paneXml(p.freeze.rows, p.freeze.cols) : ''}</sheetView></sheetViews>`;
 
+/** Excel's own defaults; pageSetup is only valid immediately after pageMargins. */
+const MARGINS_XML =
+  '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>';
+
 const pageSetupXml = (p: SheetPolish): string =>
   `<pageSetup paperSize="9" orientation="${p.landscape ? 'landscape' : 'portrait'}"`
   + `${p.fitToWidth ? ' fitToWidth="1" fitToHeight="0"' : ''}/>`;
@@ -99,11 +103,25 @@ export const polishXlsx = async (
       else xml = xml.replace(/(<worksheet[^>]*>)/, `$1${views}`);
     }
 
-    // pageSetup goes after pageMargins, which xlsx-js-style already writes.
+    // pageSetup must sit immediately after pageMargins, and the pair must come
+    // BEFORE any of the elements the schema orders after them — in practice
+    // <ignoredErrors>, which xlsx-js-style emits whenever a sheet carries
+    // numbers-stored-as-text. Appending at the end of <worksheet> puts them in
+    // the wrong order and Excel refuses the file outright ("unreadable
+    // content"), while LibreOffice happily opens it — so this must be anchored,
+    // never appended.
     if (!/<pageSetup[^>]*\/>/.test(xml)) {
       const setup = pageSetupXml(polish);
-      if (/<pageMargins[^>]*\/>/.test(xml)) xml = xml.replace(/(<pageMargins[^>]*\/>)/, `$1${setup}`);
-      else xml = xml.replace('</worksheet>', `${setup}</worksheet>`);
+      if (/<pageMargins[^>]*\/>/.test(xml)) {
+        xml = xml.replace(/(<pageMargins[^>]*\/>)/, `$1${setup}`);
+      } else {
+        // No margins written at all — emit the pair together at the right anchor.
+        const block = `${MARGINS_XML}${setup}`;
+        const anchor = /<(ignoredErrors|smartTags|drawing|legacyDrawing|picture|oleObjects|controls|webPublishItems|tableParts|extLst)\b/.exec(xml);
+        xml = anchor
+          ? xml.replace(anchor[0], `${block}${anchor[0]}`)
+          : xml.replace('</worksheet>', `${block}</worksheet>`);
+      }
     }
     // fitToPage has to be declared on sheetPr for fitToWidth to take effect.
     if (polish.fitToWidth && !/<sheetPr[^>]*>/.test(xml)) {

@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTallyStore } from '../../services/tally';
 import { LedgerEntry } from '../../types';
-import { Download, Search, CheckSquare, ChevronDown, ChevronUp, Wallet } from 'lucide-react';
+import { Download, Search, CheckSquare, ChevronDown, ChevronUp, Wallet, FileText, Printer } from 'lucide-react';
+import type { CashFlowExcelInput } from '../../services/cashFlowExcel';
 import {
   ResponsiveContainer,
   BarChart,
@@ -977,6 +978,45 @@ const CashFlowAnalysis: React.FC<CashFlowAnalysisProps> = ({ data }) => {
     setSelectedCashLedgers([]);
   };
 
+  // One model, three renderings — the Excel workbook, the HTML report and the
+  // printed PDF all read this, so the figures cannot drift between them.
+  const reportInput = (): CashFlowExcelInput => ({
+    companyTitle: store?.meta?.companyName || 'Cash Flow Analysis',
+    fromDate: fromDate ? toDDMMYYYY(fromDate) : '-',
+    toDate: toDate ? toDDMMYYYY(toDate) : '-',
+    cashLedgers: selectedCashLedgers,
+    filters: { search: mainSearch, direction: directionFilter, minAmount },
+    statement: {
+      buckets: cashFlowStatement.buckets,
+      byActivity: cashFlowStatement.byActivity,
+      adjustmentNet: cashFlowStatement.adjustmentNet,
+      opening: cashFlowStatement.opening,
+      movement: cashFlowStatement.movement,
+      closing: cashFlowStatement.closing,
+    },
+    cashPosition: flowModel.cashPosition,
+    cashLedgerDetail,
+    ledgerDetailRows,
+    primaryRows: flowModel.byOppositePrimary,
+    monthlySeries: flowModel.monthlySeries,
+    totals: {
+      inflow: summary.inflow,
+      outflow: summary.outflow,
+      net: summary.net,
+      voucherCount: summary.voucherCount,
+      visibleRows: summary.visibleRows,
+      blockedCapitalOutflow: summary.blockedCapitalOutflow,
+    },
+  });
+
+  const fileStamp = (): string => {
+    const company = (store?.meta?.companyName || 'Company').replace(/[^A-Za-z0-9]+/g, '_').slice(0, 40);
+    const period = fromDate && toDate
+      ? `${fromDate.replace(/-/g, '')}_${toDate.replace(/-/g, '')}`
+      : new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    return `${company}_${period}`;
+  };
+
   const exportExcel = async () => {
     if (filteredRows.length === 0) return;
 
@@ -985,34 +1025,7 @@ const CashFlowAnalysis: React.FC<CashFlowAnalysisProps> = ({ data }) => {
       const { buildCashFlowWorkbook, cashFlowSheetPolish } = await import('../../services/cashFlowExcel');
       const { polishXlsx, downloadPolished } = await import('../../services/xlsxPolish');
 
-      const workbook = buildCashFlowWorkbook({
-        companyTitle: store?.meta?.companyName || 'Cash Flow Analysis',
-        fromDate: fromDate ? toDDMMYYYY(fromDate) : '-',
-        toDate: toDate ? toDDMMYYYY(toDate) : '-',
-        cashLedgers: selectedCashLedgers,
-        filters: { search: mainSearch, direction: directionFilter, minAmount },
-        statement: {
-          buckets: cashFlowStatement.buckets,
-          byActivity: cashFlowStatement.byActivity,
-          adjustmentNet: cashFlowStatement.adjustmentNet,
-          opening: cashFlowStatement.opening,
-          movement: cashFlowStatement.movement,
-          closing: cashFlowStatement.closing,
-        },
-        cashPosition: flowModel.cashPosition,
-        cashLedgerDetail,
-        ledgerDetailRows,
-        primaryRows: flowModel.byOppositePrimary,
-        monthlySeries: flowModel.monthlySeries,
-        totals: {
-          inflow: summary.inflow,
-          outflow: summary.outflow,
-          net: summary.net,
-          voucherCount: summary.voucherCount,
-          visibleRows: summary.visibleRows,
-          blockedCapitalOutflow: summary.blockedCapitalOutflow,
-        },
-      });
+      const workbook = buildCashFlowWorkbook(reportInput());
 
       // Freeze panes, gridlines and page setup are spliced in after the write —
       // xlsx-js-style accepts them and then drops them.
@@ -1020,14 +1033,54 @@ const CashFlowAnalysis: React.FC<CashFlowAnalysisProps> = ({ data }) => {
       const polished = await polishXlsx(raw, cashFlowSheetPolish(),
         { showGridLines: false, landscape: true, fitToWidth: true });
 
-      const stamp = fromDate && toDate
-        ? `${fromDate.replace(/-/g, '')}_${toDate.replace(/-/g, '')}`
-        : new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const company = (store?.meta?.companyName || 'Company').replace(/[^A-Za-z0-9]+/g, '_').slice(0, 40);
-      downloadPolished(polished, `Cash_Flow_${company}_${stamp}.xlsx`);
+      downloadPolished(polished, `Cash_Flow_${fileStamp()}.xlsx`);
     } catch (error) {
       console.error(error);
       window.alert('Unable to export Cash Flow analysis. Please retry.');
+    }
+  };
+
+  const buildReportHtml = async (): Promise<string> => {
+    const { buildCashFlowReportHtml } = await import('../../services/cashFlowReport');
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return buildCashFlowReportHtml(reportInput(), `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}`);
+  };
+
+  const exportReportHtml = async () => {
+    if (filteredRows.length === 0) return;
+    try {
+      const html = await buildReportHtml();
+      const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Cash_Flow_Report_${fileStamp()}.html`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error(error);
+      window.alert('Unable to build the Cash Flow report. Please retry.');
+    }
+  };
+
+  // PDF is the same HTML through the browser's own print engine, so it is
+  // pixel-identical to the report rather than a second rendering of it.
+  const exportReportPdf = async () => {
+    if (filteredRows.length === 0) return;
+    try {
+      const html = await buildReportHtml();
+      const win = window.open('', '_blank');
+      if (!win) {
+        window.alert('Allow pop-ups for this site to open the printable report.');
+        return;
+      }
+      win.document.write(html);
+      win.document.close();
+      // Give the layout a tick to settle before the print dialog steals the thread.
+      win.addEventListener('load', () => window.setTimeout(() => win.print(), 250));
+    } catch (error) {
+      console.error(error);
+      window.alert('Unable to build the Cash Flow report. Please retry.');
     }
   };
 
@@ -1178,13 +1231,32 @@ const CashFlowAnalysis: React.FC<CashFlowAnalysisProps> = ({ data }) => {
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
                 />
               </div>
-              <button
-                onClick={exportExcel}
-                className="xl:col-span-2 px-4 py-2 rounded-lg text-sm font-bold bg-emerald-600 text-white hover:bg-emerald-700 flex items-center justify-center gap-2"
-              >
-                <Download size={15} />
-                Export Excel
-              </button>
+              <div className="xl:col-span-2 flex gap-2">
+                <button
+                  onClick={exportExcel}
+                  title="Formatted multi-sheet workbook"
+                  className="flex-1 px-3 py-2 rounded-lg text-sm font-bold bg-emerald-600 text-white hover:bg-emerald-700 flex items-center justify-center gap-1.5"
+                >
+                  <Download size={15} />
+                  Excel
+                </button>
+                <button
+                  onClick={exportReportHtml}
+                  title="Self-contained HTML report with charts"
+                  className="flex-1 px-3 py-2 rounded-lg text-sm font-bold bg-slate-800 text-white hover:bg-slate-900 flex items-center justify-center gap-1.5"
+                >
+                  <FileText size={15} />
+                  HTML
+                </button>
+                <button
+                  onClick={exportReportPdf}
+                  title="Opens the report and the print dialog — choose Save as PDF"
+                  className="flex-1 px-3 py-2 rounded-lg text-sm font-bold bg-blue-700 text-white hover:bg-blue-800 flex items-center justify-center gap-1.5"
+                >
+                  <Printer size={15} />
+                  PDF
+                </button>
+              </div>
             </div>
           </div>
 

@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import JSZip from 'jszip';
 import XLSX from 'xlsx-js-style';
+import { buildCashFlowReportHtml } from '../services/cashFlowReport';
 import { SHEETS, buildCashFlowWorkbook, cashFlowSheetPolish, type CashFlowExcelInput } from '../services/cashFlowExcel';
 import { polishXlsx } from '../services/xlsxPolish';
 
@@ -120,17 +121,58 @@ const run = async () => {
     Object.keys(zip.files).filter((f) => /^xl\/worksheets\/sheet\d+\.xml$/.test(f))
       .map((f) => zip.file(f)!.async('string')),
   );
+  // 6a. Element order inside <worksheet> is fixed by the OOXML schema. Excel
+  //     refuses a file that gets it wrong ("unreadable content") while
+  //     LibreOffice opens it regardless — so assert the order here, because
+  //     eyeballing the rendered sheet will not catch it.
+  const CT_WORKSHEET_ORDER = ['sheetPr', 'dimension', 'sheetViews', 'sheetFormatPr', 'cols', 'sheetData',
+    'sheetCalcPr', 'sheetProtection', 'protectedRanges', 'scenarios', 'autoFilter', 'sortState',
+    'dataConsolidate', 'customSheetViews', 'mergeCells', 'phoneticPr', 'conditionalFormatting',
+    'dataValidations', 'hyperlinks', 'printOptions', 'pageMargins', 'pageSetup', 'headerFooter',
+    'rowBreaks', 'colBreaks', 'customProperties', 'cellWatches', 'ignoredErrors', 'smartTags',
+    'drawing', 'legacyDrawing', 'picture', 'oleObjects', 'controls', 'webPublishItems', 'tableParts', 'extLst'];
+  sheetXmls.forEach((xml, n) => {
+    const body = xml.replace(/<sheetData>[\s\S]*?<\/sheetData>/, '<sheetData/>');
+    const seen = CT_WORKSHEET_ORDER
+      .map((el) => ({ el, at: new RegExp(`<${el}[\\s/>]`).exec(body)?.index ?? -1 }))
+      .filter((x) => x.at >= 0);
+    const positions = seen.map((x) => x.at);
+    const sorted = [...positions].sort((a, b) => a - b);
+    assert.deepEqual(positions, sorted,
+      `sheet ${n + 1}: worksheet elements out of schema order — Excel will refuse the file. Got ${seen.map((x) => x.el).join(' → ')}`);
+    assert.ok(/<pageMargins[^>]*\/>\s*<pageSetup/.test(body),
+      `sheet ${n + 1}: pageSetup must immediately follow pageMargins`);
+  });
+
   const frozen = sheetXmls.filter((x) => x.includes('state="frozen"')).length;
   assert.equal(frozen, Object.keys(cashFlowSheetPolish()).length, 'freeze panes did not survive the write');
   assert.ok(sheetXmls.every((x) => x.includes('showGridLines="0"')), 'gridlines not turned off');
   assert.ok(sheetXmls.every((x) => x.includes('orientation="landscape"')), 'page setup missing');
 
+  // 7. The HTML report reads the same model, so the headline figures must be
+  //    the same strings the workbook carries. It must also be self-contained:
+  //    a report that reaches for a CDN is useless attached to an email.
+  const html = buildCashFlowReportHtml(input, '05-08-2026');
+  assert.ok(!/<(script|link|img)\b[^>]*\b(src|href)=["']https?:/i.test(html),
+    'report must not reference external resources');
+  assert.ok(!/<script\b(?![^>]*>\s*<\/script>)/i.test(html.replace(/onclick="[^"]*"/g, '')),
+    'report must not carry inline scripts beyond the print button handler');
+  assert.ok(html.includes('70,000.00'), 'closing cash missing from the report');
+  assert.ok(html.includes('1,50,000.00'), 'report is not using Indian lakh grouping');
+  assert.ok(html.includes('@page'), 'print stylesheet missing — the PDF depends on it');
+  assert.ok(html.includes('display: table-header-group'), 'table headers will not repeat across PDF pages');
+  ['Cash flow from operating activities', 'Movement in cash &amp; bank ledgers', 'Basis of preparation']
+    .forEach((s) => assert.ok(html.includes(s), `report section missing: ${s}`));
+  const charts = (html.match(/<svg /g) ?? []).length;
+  assert.ok(charts >= 4, `expected at least 4 charts, found ${charts}`);
+
   const out = process.argv[2];
   if (out) {
     writeFileSync(out, Buffer.from(polished));
-    console.log(`wrote ${out}`);
+    writeFileSync(out.replace(/\.xlsx$/, '.html'), html);
+    console.log(`wrote ${out} and ${out.replace(/\.xlsx$/, '.html')}`);
   }
-  console.log('Cash Flow workbook: all checks passed.');
+  console.log('Cash Flow workbook + report: all checks passed.');
 };
 
 run().catch((e) => { console.error(e); process.exit(1); });
