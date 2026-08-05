@@ -24,6 +24,21 @@ const queryClient = new QueryClient({
   },
 });
 
+// Every module is lazy-loaded, so a tab left open across a deploy holds an
+// index bundle pointing at chunk filenames that no longer exist — opening a
+// module then dies with "Failed to fetch dynamically imported module". Vite
+// fires `vite:preloadError` for exactly this; reload once to pick up the new
+// build. One reload per tab session: if the chunk still 404s after reloading
+// the deploy is genuinely broken, and the error must surface rather than spin
+// the page in a refresh loop.
+window.addEventListener('vite:preloadError', (event) => {
+  const RELOADED = 'finanalyzer:chunk-reload';
+  if (sessionStorage.getItem(RELOADED)) return; // already tried — let the error surface
+  event.preventDefault();
+  sessionStorage.setItem(RELOADED, '1');
+  window.location.reload();
+});
+
 const rootElement = document.getElementById('root');
 if (!rootElement) {
   throw new Error("Could not find root element to mount to");
