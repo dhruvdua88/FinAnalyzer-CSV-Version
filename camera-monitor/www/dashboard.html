@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camera Monitor</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%A5%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222c; --line:#2a2f3a;
+    --text:#e7e9ee; --muted:#9aa3b2; --accent:#4c9ffe; --accent-ink:#08111f;
+    --danger:#ff5c5c; --ok:#3ecf8e; --tile:#000;
+    --radius:12px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#eef1f5; --panel:#ffffff; --panel2:#f3f5f9; --line:#dbe0e8;
+      --text:#151922; --muted:#5b6472; --accent:#1f6feb; --accent-ink:#ffffff;
+      --danger:#d63c3c; --ok:#1c9e63; --tile:#0a0a0a;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--text);
+    font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    display:flex; flex-direction:column; min-height:100%;
+  }
+  header{
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+    padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--line);
+    position:sticky; top:0; z-index:20;
+  }
+  .brand{font-weight:650; font-size:16px; display:flex; align-items:center; gap:8px}
+  .brand small{color:var(--muted); font-weight:500}
+  .spacer{flex:1}
+  .count{color:var(--muted)}
+  button, select{
+    font:inherit; color:var(--text); background:var(--panel2);
+    border:1px solid var(--line); border-radius:9px; padding:7px 11px; cursor:pointer;
+  }
+  button:hover, select:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent); color:var(--accent-ink); border-color:transparent; font-weight:600}
+  button.ghost{background:transparent}
+  button.danger{color:var(--danger); border-color:transparent; background:transparent}
+  label.field{display:flex; flex-direction:column; gap:5px; font-size:13px; color:var(--muted)}
+  input[type=text], input[type=password]{
+    font:inherit; color:var(--text); background:var(--panel2);
+    border:1px solid var(--line); border-radius:8px; padding:9px 10px; width:100%;
+  }
+  input:focus, select:focus, button:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+
+  /* banner */
+  #banner{display:none; padding:10px 14px; background:#3a1d1d; color:#ffd3d3;
+    border-bottom:1px solid #5a2b2b; font-size:13px}
+  @media (prefers-color-scheme: light){ #banner{background:#fde8e8; color:#7a1f1f; border-color:#f4c2c2} }
+
+  /* grid */
+  main{flex:1; padding:12px; }
+  #wall{
+    display:grid; gap:12px;
+    grid-template-columns:repeat(var(--cols, 3), minmax(0,1fr));
+  }
+  #wall[data-cols="auto"]{grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+  .tile{
+    position:relative; background:var(--tile); border:1px solid var(--line);
+    border-radius:var(--radius); overflow:hidden; aspect-ratio:16/9; min-height:150px;
+  }
+  .tile video, .tile video-stream video{width:100%; height:100%; object-fit:contain; background:#000}
+  video-stream{display:block; width:100%; height:100%}
+  video-stream .info{ font:600 11px system-ui; text-shadow:0 1px 3px rgba(0,0,0,.8) }
+  .tile-bar{
+    position:absolute; left:0; right:0; bottom:0; display:flex; align-items:center; gap:6px;
+    padding:8px 10px; color:#fff;
+    background:linear-gradient(transparent, rgba(0,0,0,.65));
+    opacity:0; transition:opacity .15s;
+  }
+  .tile:hover .tile-bar, .tile:focus-within .tile-bar{opacity:1}
+  .tile-name{font-weight:600; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-shadow:0 1px 2px #000}
+  .tile-bar button{padding:4px 8px; background:rgba(0,0,0,.45); border-color:rgba(255,255,255,.25); color:#fff}
+  .tile-bar button:hover{border-color:#fff}
+
+  /* empty state */
+  .empty{
+    text-align:center; color:var(--muted); padding:64px 20px; border:1px dashed var(--line);
+    border-radius:var(--radius); background:var(--panel);
+  }
+  .empty h2{color:var(--text); margin:0 0 6px}
+
+  /* modal */
+  .overlay{position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; z-index:50;
+    align-items:flex-start; justify-content:center; padding:5vh 14px; overflow:auto}
+  .overlay.open{display:flex}
+  .modal{background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    width:min(680px,100%); box-shadow:0 20px 60px rgba(0,0,0,.4)}
+  .modal header{position:static; border-radius:14px 14px 0 0}
+  .modal .body{padding:16px}
+  .tabs{display:flex; gap:6px; padding:0 16px; border-bottom:1px solid var(--line); flex-wrap:wrap}
+  .tabs button{border:none; background:transparent; border-bottom:2px solid transparent; border-radius:0; padding:12px 8px; color:var(--muted)}
+  .tabs button.active{color:var(--text); border-bottom-color:var(--accent)}
+  .tabpane{display:none}
+  .tabpane.active{display:block}
+  .row{display:flex; gap:10px; flex-wrap:wrap}
+  .row > *{flex:1; min-width:160px}
+  .actions{display:flex; justify-content:flex-end; gap:8px; margin-top:14px}
+  .hint{color:var(--muted); font-size:12.5px; margin:8px 0}
+  table{width:100%; border-collapse:collapse; font-size:13px}
+  th,td{text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{color:var(--muted); font-weight:600}
+  code{background:var(--panel2); padding:1px 5px; border-radius:5px; font-size:12px}
+  .found-item{display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:8px; background:var(--panel2)}
+  .found-item .u{font-weight:600}
+  .found-item .cred{display:flex; gap:6px; flex:1; min-width:220px}
+  .spin{display:inline-block; width:14px; height:14px; border:2px solid var(--muted); border-top-color:transparent; border-radius:50%; animation:sp .7s linear infinite; vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* toast */
+  #toast{position:fixed; left:50%; bottom:22px; transform:translateX(-50%); z-index:80;
+    display:flex; flex-direction:column; gap:8px; align-items:center}
+  .toast{background:var(--panel2); border:1px solid var(--line); color:var(--text);
+    padding:10px 14px; border-radius:10px; box-shadow:0 8px 30px rgba(0,0,0,.35); max-width:90vw}
+  .toast.ok{border-color:var(--ok)} .toast.err{border-color:var(--danger)}
+
+  @media (max-width:640px){
+    #wall{grid-template-columns:1fr !important}
+    .brand small{display:none}
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">🎥 Camera Monitor <small>· same-WiFi live view</small></span>
+  <span class="count" id="count">—</span>
+  <span class="spacer"></span>
+  <label style="color:var(--muted)">Layout
+    <select id="cols" title="Columns">
+      <option value="auto">Auto</option>
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="3" selected>3</option>
+      <option value="4">4</option>
+    </select>
+  </label>
+  <button id="refresh" class="ghost" title="Refresh list">⟳ Refresh</button>
+  <button id="fullscreen" class="ghost" title="Full screen">⛶ Full screen</button>
+  <button id="add" class="primary">＋ Add camera</button>
+</header>
+
+<div id="banner"></div>
+
+<main>
+  <div id="wall" data-cols="3" style="--cols:3"></div>
+  <div id="empty" class="empty" hidden>
+    <h2>No cameras yet</h2>
+    <p>Click <b>＋ Add camera</b> to scan your WiFi for cameras (ONVIF) or paste a camera link (RTSP).</p>
+    <button class="primary" onclick="document.getElementById('add').click()">＋ Add your first camera</button>
+  </div>
+</main>
+
+<!-- Add-camera modal -->
+<div class="overlay" id="modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Add camera">
+    <header><span class="brand" style="font-size:15px">Add a camera</span><span class="spacer"></span><button class="ghost" id="close">✕</button></header>
+    <div class="tabs">
+      <button data-tab="scan" class="active">🔎 Scan WiFi (ONVIF)</button>
+      <button data-tab="manual">🔗 Paste a link</button>
+      <button data-tab="help">📋 Find my camera's link</button>
+    </div>
+    <div class="body">
+      <!-- SCAN -->
+      <div class="tabpane active" id="tab-scan">
+        <p class="hint">Looks for ONVIF-compatible cameras on this network. Most modern IP/WiFi cameras support it.
+          Found a camera? Type its <b>username &amp; password</b> (the ones from the camera's app/label) and click <b>Add</b>.</p>
+        <div class="row">
+          <button class="primary" id="doScan">🔎 Scan the network</button>
+        </div>
+        <div id="scanStatus" class="hint"></div>
+        <div id="found"></div>
+      </div>
+      <!-- MANUAL -->
+      <div class="tabpane" id="tab-manual">
+        <p class="hint">Paste a camera stream link. Works with <code>rtsp://</code>, <code>onvif://</code>, or <code>http://</code> (MJPEG) links.</p>
+        <div class="row">
+          <label class="field">Name<input type="text" id="mName" placeholder="front_door" autocomplete="off"></label>
+        </div>
+        <label class="field" style="margin-top:10px">Camera link
+          <input type="text" id="mSrc" placeholder="rtsp://user:pass@192.168.1.20:554/stream" autocomplete="off">
+        </label>
+        <div class="actions">
+          <button class="primary" id="mAdd">Add camera</button>
+        </div>
+      </div>
+      <!-- HELP -->
+      <div class="tabpane" id="tab-help">
+        <p class="hint">Don't know your camera's link? Two ways to get it:</p>
+        <ol class="hint" style="margin-top:0">
+          <li>Try <b>🔎 Scan WiFi</b> first — it finds most cameras automatically.</li>
+          <li>Otherwise, find the camera's IP (in your router or the camera's phone app) and use the pattern for your brand below. Replace <code>USER</code>, <code>PASS</code>, and the IP.</li>
+        </ol>
+        <table>
+          <thead><tr><th>Brand</th><th>Typical RTSP link (main stream)</th></tr></thead>
+          <tbody>
+            <tr><td>Reolink</td><td><code>rtsp://USER:PASS@IP:554/h264Preview_01_main</code></td></tr>
+            <tr><td>Hikvision / Annke</td><td><code>rtsp://USER:PASS@IP:554/Streaming/Channels/101</code></td></tr>
+            <tr><td>Dahua / Amcrest</td><td><code>rtsp://USER:PASS@IP:554/cam/realmonitor?channel=1&amp;subtype=0</code></td></tr>
+            <tr><td>TP-Link Tapo</td><td><code>rtsp://USER:PASS@IP:554/stream1</code></td></tr>
+            <tr><td>Ubiquiti UniFi</td><td><code>rtsp://IP:7447/&lt;stream-id&gt;</code> (enable RTSP per camera)</td></tr>
+            <tr><td>Wyze (with RTSP firmware)</td><td><code>rtsp://USER:PASS@IP/live</code></td></tr>
+            <tr><td>Any ONVIF camera</td><td><code>onvif://USER:PASS@IP:80</code> (go2rtc finds the RTSP link for you)</td></tr>
+          </tbody>
+        </table>
+        <p class="hint">Tip: cameras usually have a low-res “sub” stream too (lighter on WiFi). For Hikvision that's <code>.../Channels/102</code>; Dahua uses <code>subtype=1</code>.</p>
+        <p class="hint"><b>Cloud-only cameras</b> (stock Ring, Nest, Wyze without RTSP firmware) block local access, so they usually can't be monitored this way.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script type="module" src="./video-stream.js"></script>
+<script type="module">
+const API = 'api';
+const wall = document.getElementById('wall');
+const emptyEl = document.getElementById('empty');
+const countEl = document.getElementById('count');
+const banner = document.getElementById('banner');
+const tiles = new Map();            // name -> tile element
+const PLAY_MODE = 'webrtc,mse,mp4,mjpeg';
+
+/* ---------- helpers ---------- */
+function toast(msg, kind='ok', ms=3200){
+  const t = document.createElement('div');
+  t.className = 'toast ' + kind; t.textContent = msg;
+  document.getElementById('toast').appendChild(t);
+  setTimeout(()=>{ t.style.opacity='0'; t.style.transition='opacity .3s'; setTimeout(()=>t.remove(),300); }, ms);
+}
+function showBanner(msg){ banner.textContent = msg; banner.style.display = msg ? 'block' : 'none'; }
+function sanitizeName(n){
+  n = (n||'').trim().replace(/[^A-Za-z0-9_-]+/g,'_').replace(/^_+|_+$/g,'');
+  return n || ('cam_' + Date.now().toString(36));
+}
+function withCreds(url, user, pass){
+  if(!user) return url;
+  const m = url.match(/^([a-z0-9]+):\/\/(?:[^@/]*@)?(.*)$/i);
+  if(!m) return url;
+  const cred = encodeURIComponent(user) + (pass ? ':' + encodeURIComponent(pass) : '');
+  return `${m[1]}://${cred}@${m[2]}`;
+}
+
+/* ---------- streams list ---------- */
+async function loadStreams(){
+  let data;
+  try{
+    const r = await fetch(`${API}/streams`, {cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    data = await r.json();
+    showBanner('');
+  }catch(e){
+    showBanner('⚠ Can’t reach the streaming engine. Make sure the monitor is running (the start script/terminal window), then click Refresh.');
+    return;
+  }
+  const names = Object.keys(data || {}).sort((a,b)=>a.localeCompare(b));
+
+  // remove tiles no longer present
+  for(const [name, el] of tiles){
+    if(!names.includes(name)){ el.remove(); tiles.delete(name); }
+  }
+  // add new tiles (leave existing ones streaming, untouched)
+  for(const name of names){
+    if(!tiles.has(name)) wall.appendChild(makeTile(name));
+  }
+  // order
+  names.forEach(n => wall.appendChild(tiles.get(n)));
+
+  countEl.textContent = names.length ? `${names.length} camera${names.length>1?'s':''}` : '';
+  emptyEl.hidden = names.length > 0;
+  wall.style.display = names.length ? 'grid' : 'none';
+}
+
+function makeTile(name){
+  const tile = document.createElement('div');
+  tile.className = 'tile'; tile.dataset.name = name; tile.tabIndex = 0;
+
+  const player = document.createElement('video-stream');
+  player.background = false;      // pause when tab hidden (saves bandwidth), auto-resume
+  player.mode = PLAY_MODE;
+  player.media = 'video';         // no audio on the wall
+  tile.appendChild(player);
+  // element is now connected -> its <video> exists
+  if(player.video) player.video.muted = true;
+  player.src = new URL(`${API}/ws?src=${encodeURIComponent(name)}`, location.href).toString();
+
+  const bar = document.createElement('div');
+  bar.className = 'tile-bar';
+  bar.innerHTML = `<span class="tile-name">${name.replace(/</g,'&lt;')}</span>`;
+  const mkBtn = (label, title, fn) => { const b=document.createElement('button'); b.textContent=label; b.title=title; b.onclick=(e)=>{e.stopPropagation(); fn();}; return b; };
+  bar.appendChild(mkBtn('⛶','Full screen', ()=> tile.requestFullscreen && tile.requestFullscreen()));
+  bar.appendChild(mkBtn('⟳','Reconnect', ()=>{ player.src = new URL(`${API}/ws?src=${encodeURIComponent(name)}`, location.href).toString(); toast(`Reconnecting ${name}…`); }));
+  bar.appendChild(mkBtn('✕','Remove', ()=> removeCamera(name)));
+  tile.appendChild(bar);
+
+  tiles.set(name, tile);
+  return tile;
+}
+
+/* ---------- add / remove ---------- */
+async function addCamera(name, src){
+  name = sanitizeName(name);
+  src = (src||'').trim();
+  if(!src){ toast('Please enter a camera link.', 'err'); return false; }
+  try{
+    // PUT adds the stream at runtime AND saves it to go2rtc.yaml (survives restarts).
+    const u = new URL(`${API}/streams`, location.href);
+    u.searchParams.set('name', name); u.searchParams.set('src', src);
+    const rr = await fetch(u, {method:'PUT'});
+    if(!rr.ok) throw new Error('HTTP ' + rr.status);
+    await loadStreams();
+    toast(`Added “${name}”.`, 'ok');
+    return true;
+  }catch(e){
+    toast(`Couldn’t add camera: ${e.message}`, 'err', 5000);
+    return false;
+  }
+}
+
+async function removeCamera(name){
+  if(!confirm(`Remove “${name}”?`)) return;
+  try{
+    const u = new URL(`${API}/streams`, location.href);
+    u.searchParams.set('src', name);
+    const r = await fetch(u, {method:'DELETE'});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+  }catch(e){ toast(`Couldn’t remove: ${e.message}`, 'err'); return; }
+  const el = tiles.get(name); if(el){ el.remove(); tiles.delete(name); }
+  await loadStreams();
+  toast(`Removed “${name}”.`);
+}
+
+/* ---------- ONVIF scan ---------- */
+async function scan(){
+  const status = document.getElementById('scanStatus');
+  const found = document.getElementById('found');
+  status.innerHTML = '<span class="spin"></span> Scanning the network… (this can take ~10 seconds)';
+  found.innerHTML = '';
+  try{
+    const r = await fetch(`${API}/onvif`, {cache:'no-store'});
+    // go2rtc returns 404 + plain text "no sources" when nothing is discovered.
+    const text = await r.text();
+    let sources = [];
+    if(r.ok){
+      try{ sources = (JSON.parse(text).sources) || []; }catch(_){ sources = []; }
+    }else if(r.status !== 404){
+      throw new Error('HTTP ' + r.status);
+    }
+    if(!sources.length){
+      status.innerHTML = 'No ONVIF cameras answered. Your cameras may not support ONVIF, or need it enabled in their app. Try the <b>Paste a link</b> or <b>Find my camera’s link</b> tab.';
+      return;
+    }
+    status.textContent = `Found ${sources.length} device${sources.length>1?'s':''}. Enter each camera’s username & password, then Add.`;
+    sources.forEach((s, i) => {
+      const url = s.url || s.location || '';
+      const suggested = sanitizeName((s.name || `camera_${i+1}`).split(/\s+/)[0]);
+      const item = document.createElement('div');
+      item.className = 'found-item';
+      item.innerHTML = `
+        <div style="flex-basis:100%"><span class="u">${(s.name||'ONVIF camera').replace(/</g,'&lt;')}</span>
+          <div class="hint" style="margin:2px 0 0">${url.replace(/</g,'&lt;')}</div></div>
+        <input type="text" placeholder="name" style="max-width:130px" value="${suggested}">
+        <div class="cred">
+          <input type="text" placeholder="username" autocomplete="off">
+          <input type="password" placeholder="password" autocomplete="off">
+        </div>
+        <button class="primary">Add</button>`;
+      const [nameI, userI, passI] = item.querySelectorAll('input');
+      item.querySelector('button').onclick = async (ev) => {
+        ev.target.disabled = true; ev.target.textContent = 'Adding…';
+        const src = withCreds(url.startsWith('onvif') ? url : `onvif://${url.replace(/^[a-z]+:\/\//i,'')}`, userI.value, passI.value);
+        const ok = await addCamera(nameI.value, src);
+        ev.target.textContent = ok ? '✓ Added' : 'Add'; ev.target.disabled = !ok;
+      };
+      found.appendChild(item);
+    });
+  }catch(e){
+    status.textContent = `Scan failed: ${e.message}`;
+  }
+}
+
+/* ---------- UI wiring ---------- */
+document.getElementById('cols').addEventListener('change', e=>{
+  const v = e.target.value;
+  wall.dataset.cols = v;
+  wall.style.setProperty('--cols', v === 'auto' ? '3' : v);
+  try{ localStorage.setItem('cm_cols', v); }catch(_){}
+});
+document.getElementById('refresh').onclick = ()=> loadStreams();
+document.getElementById('fullscreen').onclick = ()=>{
+  if(document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+};
+
+// modal
+const modal = document.getElementById('modal');
+const openModal = ()=> modal.classList.add('open');
+const closeModal = ()=> modal.classList.remove('open');
+document.getElementById('add').onclick = openModal;
+document.getElementById('close').onclick = closeModal;
+modal.addEventListener('click', e=>{ if(e.target === modal) closeModal(); });
+document.addEventListener('keydown', e=>{ if(e.key === 'Escape') closeModal(); });
+document.querySelectorAll('.tabs button').forEach(b=>{
+  b.onclick = ()=>{
+    document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.tabpane').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    document.getElementById('tab-' + b.dataset.tab).classList.add('active');
+  };
+});
+document.getElementById('doScan').onclick = scan;
+document.getElementById('mAdd').onclick = async ()=>{
+  const ok = await addCamera(document.getElementById('mName').value, document.getElementById('mSrc').value);
+  if(ok){ document.getElementById('mName').value=''; document.getElementById('mSrc').value=''; closeModal(); }
+};
+
+// restore layout preference
+try{
+  const saved = localStorage.getItem('cm_cols');
+  if(saved){ const sel = document.getElementById('cols'); sel.value = saved; sel.dispatchEvent(new Event('change')); }
+}catch(_){}
+
+loadStreams();
+</script>
+</body>
+</html>

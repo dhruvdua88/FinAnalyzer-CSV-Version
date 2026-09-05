@@ -1,0 +1,9 @@
+# Downloaded streaming engine (fetched by the start scripts on first run)
+go2rtc
+go2rtc.exe
+go2rtc.zip
+*.zip
+
+# go2rtc runtime files
+go2rtc.log
+recordings/
