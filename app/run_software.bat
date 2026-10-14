@@ -2,11 +2,19 @@
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
+REM Default: serve the prebuilt UI (dist\) from the desktop backend. The UI is
+REM rebuilt only when its sources change, so normal launches skip Vite entirely.
+REM Pass --dev to run the Vite dev server instead (for code changes / HMR).
+
 set "APP_PORT=5173"
 set "APP_URL=http://127.0.0.1:%APP_PORT%"
-set "APP_LOG=vite-dev.log"
+set "APP_LOG=finanalyzer-server.log"
+set "DEV_LOG=vite-dev.log"
+set "TEMP_ROOT=%USERPROFILE%\.finanalyzer-temp"
 set "NPM_INSTALL_CMD=npm install --no-audit --no-fund"
 set "REPAIR_ATTEMPTED=0"
+set "MODE=prod"
+if /i "%~1"=="--dev" set "MODE=dev"
 
 where node >nul 2>nul
 if errorlevel 1 (
@@ -29,10 +37,27 @@ call close_software.bat >nul 2>nul
 call :ensure_dependencies
 if errorlevel 1 goto :fail
 
+if "%MODE%"=="dev" goto :start_dev
+
+node scripts\ensure-build.cjs
+if errorlevel 1 (
+  echo Could not build the interface. Falling back to the development server...
+  goto :start_dev
+)
+
+if not exist "%TEMP_ROOT%" mkdir "%TEMP_ROOT%" >nul 2>nul
 if exist "%APP_LOG%" del /f /q "%APP_LOG%" >nul 2>nul
-echo Starting FinAnalyzer web app...
+echo Starting FinAnalyzer...
+start "FinAnalyzer Server" /min cmd /c "cd /d ""%~dp0"" & node desktop-backend\backend.cjs --standalone --app-root . --temp-dir ""%TEMP_ROOT%"" --port %APP_PORT% > ""%APP_LOG%"" 2>&1"
+goto :wait_setup
+
+:start_dev
+set "APP_LOG=%DEV_LOG%"
+if exist "%APP_LOG%" del /f /q "%APP_LOG%" >nul 2>nul
+echo Starting FinAnalyzer development server...
 start "FinAnalyzer Dev Server" /min cmd /k "cd /d ""%~dp0"" & npm run dev -- --host 127.0.0.1 --port %APP_PORT% --strictPort > ""%APP_LOG%"" 2>&1"
 
+:wait_setup
 set /a RETRIES=60
 :wait_for_port
 netstat -ano | findstr ":%APP_PORT%" | findstr "LISTENING" >nul
@@ -54,11 +79,9 @@ if exist "%APP_LOG%" (
   echo -------- LOG START --------
   type "%APP_LOG%"
   echo --------- LOG END ---------
-  echo.
-  echo You can also review the "FinAnalyzer Dev Server" command window.
 )
 if not exist "%APP_LOG%" (
-  echo Check the "FinAnalyzer Dev Server" command window for errors.
+  echo Check the minimized FinAnalyzer command window for errors.
 )
 pause
 exit /b 1
@@ -73,6 +96,7 @@ set "NEED_INSTALL=0"
 if not exist "node_modules" set "NEED_INSTALL=1"
 if not exist "node_modules\.bin\vite.cmd" set "NEED_INSTALL=1"
 if not exist "node_modules\.bin\cross-env.cmd" set "NEED_INSTALL=1"
+if not exist "node_modules\better-sqlite3\build\Release\better_sqlite3.node" set "NEED_INSTALL=1"
 
 if "%NEED_INSTALL%"=="0" (
   echo Requirements check passed.

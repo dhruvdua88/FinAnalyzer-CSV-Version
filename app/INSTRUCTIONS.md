@@ -24,8 +24,11 @@ This launcher now enforces safe startup:
 2. Calls `close_software.bat` before start.
 3. Stops existing listeners on ports `5173`, `5174`, `5175`, `5176`.
 4. Auto-installs requirements if `node_modules`/runtime binaries are missing.
-5. Starts Vite on strict port `5173` and opens `http://127.0.0.1:5173`.
-6. Writes startup logs to `vite-dev.log`.
+5. Builds the UI into `dist/` only when UI sources changed since the last build (`scripts/ensure-build.cjs`, fingerprint in `dist/.build-stamp`).
+6. Serves `dist/` and the API from the desktop backend on port `5173` and opens `http://127.0.0.1:5173`. No Vite dev server at runtime.
+7. Writes startup logs to `finanalyzer-server.log`.
+
+`run_software.bat --dev` starts the Vite dev server instead (hot reload, logs to `vite-dev.log`). The launcher also falls back to it if the UI build fails.
 
 Stop app: `close_software.bat`
 

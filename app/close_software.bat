@@ -18,6 +18,7 @@ for %%A in (%PORT_LIST%) do (
   )
 )
 
+taskkill /FI "WINDOWTITLE eq FinAnalyzer Server*" /F >nul 2>nul
 taskkill /FI "WINDOWTITLE eq FinAnalyzer Dev Server*" /F >nul 2>nul
 taskkill /FI "WINDOWTITLE eq FinAnalyzer Tauri Dev*" /F >nul 2>nul
 taskkill /IM finanalyzer.exe /T /F >nul 2>nul
